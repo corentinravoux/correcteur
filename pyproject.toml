@@ -1,0 +1,34 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "correcteur"
+version = "0.1.0"
+description = "A small desktop grammar checker for French and English, powered by a local LanguageTool server"
+readme = "README.md"
+license = { text = "MIT" }
+authors = [{ name = "Corentin Ravoux" }]
+requires-python = ">=3.11"
+dependencies = ["PySide6>=6.5"]
+keywords = ["grammar", "spelling", "languagetool", "french", "english"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: POSIX :: Linux",
+    "Topic :: Text Processing :: Linguistic",
+    "Environment :: X11 Applications :: Qt",
+]
+
+[project.optional-dependencies]
+dev = ["pytest"]
+
+[project.scripts]
+correcteur = "correcteur.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = ["integration: starts the real LanguageTool server (skipped when it is not installed)"]
