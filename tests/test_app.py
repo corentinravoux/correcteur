@@ -7,7 +7,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
 from PySide6.QtCore import QSettings
-from PySide6.QtWidgets import QApplication, QPushButton
+from PySide6.QtWidgets import QApplication, QLabel, QPushButton
 
 from correcteur.app import Window
 from correcteur.config import Config
@@ -41,7 +41,7 @@ class FakeEngine:
                                 ("Healpix", "Healpy", "spelling")):
             if word in text:
                 found.append(Issue(text.index(word), len(word), f"fix {word}", [rep], f"R{len(found)}", kind,
-                                   description=f"Rule {len(found)}"))
+                                   description=f"Rule {len(found)}", language="fr"))
         return CheckResult(found, "French")
 
 
@@ -54,7 +54,8 @@ def app():
 def window(app, tmp_path):
     QSettings.setPath(QSettings.Format.NativeFormat, QSettings.Scope.UserScope, str(tmp_path / "settings"))
     config = Config(engine_dir=None, dictionary=tmp_path / "dictionary.txt",
-                    disabled_rules=tmp_path / "disabled-rules.txt")
+                    disabled_rules=tmp_path / "disabled-rules.txt", ignored=tmp_path / "ignored.txt",
+                    interface="en")
     w = Window(config, engine=FakeEngine())
     wait_for(app, lambda: w.engine_state == "ready")
     yield w
@@ -105,14 +106,20 @@ def test_accept_all_and_undo(app, window):
 
 
 def test_add_word_and_ignore(app, window, tmp_path):
+    from correcteur.issues import load_dictionary
+
     found = checked(app, window)
-    window.add_word("Healpix")
-    assert (tmp_path / "dictionary.txt").read_text() == "Healpix\n"
+    window.add_word("Healpix", "fr")
+    assert load_dictionary(tmp_path / "dictionary-fr.txt") == {"Healpix"}
     assert len(window.editor.issues) == 2
     window.ignore(found[0])
     assert len(window.editor.issues) == 1
-    # Both stay silent at the next check.
+    assert "R0\tIl ont\t# Rule 0" in (tmp_path / "ignored.txt").read_text()
+    # Both stay silent at the next check, and in a new window.
     assert [i.rule_id for i in checked(app, window)] == ["R1"]
+    again = Window(window.config, engine=FakeEngine())
+    assert again.user.knows("Healpix", "fr") and ("R0", "Il ont") in again.user.ignored
+    again.close()
 
 
 def test_text_changed_during_check_is_discarded(app, window):
@@ -171,23 +178,42 @@ def test_theme_switch_repaints(app, window):
 
 
 def test_turn_off_and_on_a_rule(app, window, tmp_path):
-    from correcteur.app import RulesDialog
+    from correcteur.dialogs import ExceptionsDialog
     from correcteur.issues import load_rules
 
     found = checked(app, window)
-    assert not window.rules_button.isVisibleTo(window)
+    assert window.exceptions_button.text() == "Exceptions"
     window.turn_off(found[0])
     assert load_rules(tmp_path / "disabled-rules.txt") == {"R0": "Rule 0"}
     assert [i.rule_id for i in window.editor.issues] == ["R1", "R2"]
-    assert window.rules_button.text() == "1 rule off" and window.rules_button.isVisibleTo(window)
+    assert window.exceptions_button.text() == "Exceptions (1)"
     assert [i.rule_id for i in checked(app, window)] == ["R1", "R2"]  # stays off at the next check
 
-    dialog = RulesDialog(window)
-    turn_on = next(b for b in dialog.findChildren(QPushButton) if b.text() == "Turn on")
-    turn_on.click()
+    dialog = ExceptionsDialog(window)
+    assert dialog.tabs.tabText(0) == "Rules turned off (1)"
+    dialog.rules.tree.topLevelItem(0).setSelected(True)
+    dialog.rules.button.click()
     assert load_rules(tmp_path / "disabled-rules.txt") == {}
-    assert not window.rules_button.isVisibleTo(window)
+    assert dialog.tabs.tabText(0) == "Rules turned off (0)"
+    assert window.exceptions_button.text() == "Exceptions"
     assert len(checked(app, window)) == 3
+
+
+def test_exceptions_dialog_dictionary(app, window, tmp_path):
+    from correcteur.dialogs import ExceptionsDialog
+
+    dialog = ExceptionsDialog(window)
+    dialog.new_word.setText("HEALPix")
+    dialog.new_lang.setCurrentIndex(dialog.new_lang.findData("en"))
+    dialog._add_word()
+    assert window.user.words["en"] == {"HEALPix"}
+    assert dialog.tabs.tabText(2) == "Dictionary (1)"
+    dialog.words.search.setText("zzz")
+    assert dialog.words.tree.topLevelItem(0).isHidden()
+    dialog.words.search.clear()
+    dialog.words.tree.topLevelItem(0).setSelected(True)
+    dialog.words.button.click()
+    assert window.user.words["en"] == set()
 
 
 def test_paste_latex_ticks_the_box(app, window):
@@ -210,3 +236,48 @@ def test_spelling_notes_offer_no_turn_off(app, window):
               for n in window.margin.widget().findChildren(Note)}
     assert labels["spelling"] == ["Ignore", "Add to dictionary"]
     assert labels["grammar"] == ["Ignore", "Turn off rule"]
+
+
+def test_keyboard_review_loop(app, window, monkeypatch):
+    def press_enter(menu, where):
+        action = menu.activeAction()  # the first suggestion is preselected
+        action.trigger()
+        return action
+
+    monkeypatch.setattr(window, "run_menu", press_enter)
+    checked(app, window)
+    window.editor.moveCursor(window.editor.textCursor().MoveOperation.Start)
+    window.next_issue(menu=True)
+    wait_for(app, lambda: window.status.text() == "No issue left.")
+    assert window.editor.toPlainText() == "Ils ont mangé des pommes. Healpy est utile."
+
+
+def test_current_note_follows_the_cursor(app, window):
+    from correcteur.margin import Note
+
+    found = checked(app, window)
+    window.reveal(found[1])
+    notes = window.margin.widget().findChildren(Note)
+    assert [n.property("current") for n in notes] == [False, True, False]
+    assert window.current_issue() == found[1]
+
+
+def test_french_interface(app, tmp_path):
+    from dataclasses import replace
+
+    from correcteur import i18n
+
+    config = Config(engine_dir=None, dictionary=tmp_path / "d.txt", disabled_rules=tmp_path / "r.txt",
+                    ignored=tmp_path / "i.txt", interface="fr")
+    w = Window(config, engine=FakeEngine())
+    try:
+        assert w.check_button.text() == "Vérifier" and w.lang_box.itemText(2) == "Anglais (US)"
+        found = checked(app, w)
+        assert w.status.text() == "3 points à revoir en français"
+        w.language = "French + English (US)"
+        w.update_status()
+        assert w.status.text() == "3 points à revoir en français et anglais (US)"
+        assert w.margin.widget().findChildren(QLabel)[0].text() == "3 à revoir"
+    finally:
+        w.close()
+        i18n.setup("en")

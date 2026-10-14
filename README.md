@@ -48,7 +48,8 @@ Start **Correcteur** from the menu, or run `correcteur`.
 | Paste the clipboard and check it | **Paste & check** or `Ctrl+Shift+V` |
 | Fix one issue | click a suggestion in the margin, or click the underlined text |
 | See the explanation | read the margin note, or hover the underlined text |
-| Go to the next / previous issue | `F8` / `Shift+F8`, or click a margin note |
+| Review issue by issue | `F8` opens the next issue's menu: `Enter` applies the suggestion and moves on, the arrows pick another, `I` ignores, `Esc` stops (`Shift+F8` goes backwards) |
+| Open the menu of the issue at the cursor | the Menu key or `Shift+F10` |
 | Apply every first suggestion | **Accept all** (`Ctrl+Z` undoes it) |
 | Copy the text | **Copy text** or `Ctrl+Shift+C` |
 
@@ -67,17 +68,30 @@ and footnotes are checked. It is ticked automatically when pasted text looks
 like LaTeX. An issue that overlaps a command has no suggestion, so that fixing
 it cannot break the command.
 
-**Turn off rule**, in a margin note or the menu of an underline, stops a rule
-for good. The rules turned off are listed behind the "rules off" link at the
-bottom, where each can be turned back on. Spelling has no such action: add the
-word to the dictionary instead.
+**Ignore** and **Turn off rule**, in a margin note or the menu of an
+underline, last across sessions: an ignored issue is never flagged again for the
+same text, a rule turned off is never applied. Spelling has no "Turn off rule":
+add the word to the dictionary instead. **Add to dictionary** adds the word to
+the dictionary of the paragraph's language; the menu also offers the dictionary
+of all languages. The **Exceptions** link at the bottom lists the rules turned
+off, the ignored issues and the dictionary words, each with a way to undo it.
+
+In LaTeX mode, macros without arguments read as what they stand for: those
+defined in the pasted text, and those of the files listed in `latex_preamble`
+(`\newcommand\mnras{MNRAS}` makes `\mnras` read "MNRAS"; a macro that
+stands for maths, such as `\lcdm`, reads as one word).
+
+The interface is in French or English, following the system language, or the
+`interface` setting.
 
 **Accept all** takes the first suggestion each time, which is not always the
 right one (*des pomme* → *de la pomme* rather than *des pommes*); look over
 the result.
 
-A menu entry *Add to dictionary* teaches it your own words; they are stored one
-per line in `~/.config/correcteur/dictionary.txt`.
+Your words and exceptions are plain text, one entry per line, in
+`~/.config/correcteur/`: `dictionary.txt` (all languages),
+`dictionary-fr.txt`, `dictionary-en.txt`, `ignored.txt` and
+`disabled-rules.txt`.
 
 Without the window:
 
@@ -99,8 +113,11 @@ heap = "1g"                                     # Java memory limit
 english_variant = "en-US"                       # used by Auto: en-US or en-GB
 dictionary = "~/.config/correcteur/dictionary.txt"
 disabled_rules = "~/.config/correcteur/disabled-rules.txt"
+ignored = "~/.config/correcteur/ignored.txt"
 grammalecte = true                              # use Grammalecte when installed
 grammalecte_dir = "~/.local/share/correcteur/grammalecte"
+latex_preamble = ["~/thesis/macros.sty"]        # macros LaTeX mode knows
+interface = "auto"                              # "fr", "en", or "auto"
 ```
 
 ## Develop

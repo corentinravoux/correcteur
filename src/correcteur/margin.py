@@ -9,7 +9,9 @@ from PySide6.QtGui import QColor, QFont, QPainter
 from PySide6.QtWidgets import QFrame, QHBoxLayout, QLabel, QPushButton, QScrollArea, QVBoxLayout, QWidget
 
 from . import issues as iss
+from .i18n import _
 from .theme import serif
+from .userdata import LANGUAGE_NAMES, language_of
 
 if TYPE_CHECKING:
     from .app import Window
@@ -23,7 +25,7 @@ WORD_CHARS = 40
 def shown(text: str) -> str:
     """Make empty or blank text visible."""
     if text == "":
-        return "(delete)"
+        return _("(delete)")
     return text.replace(" ", "·") if not text.strip() else text
 
 
@@ -45,7 +47,7 @@ class Note(QFrame):
         self.color = QColor(window.theme.kinds[issue.kind])
         self.setObjectName("note")
         self.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.setToolTip("Show in the text")
+        self.setToolTip(_("Show in the text"))
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(16, 10, 8, 12)
@@ -70,9 +72,9 @@ class Note(QFrame):
             chips = QHBoxLayout()
             chips.setSpacing(6)
             for replacement in issue.replacements[:MAX_CHIPS]:
-                chip = QPushButton(_elide(shown(replacement), CHIP_CHARS))
+                chip = QPushButton(_elide(shown(replacement), CHIP_CHARS).replace("&", "&&"))
                 chip.setObjectName("chip")
-                chip.setToolTip(f"Replace with “{replacement}”")
+                chip.setToolTip(_("Replace with “{replacement}”", replacement=replacement))
                 chip.setCursor(Qt.CursorShape.PointingHandCursor)
                 chip.clicked.connect(lambda _=False, r=replacement: window.apply(issue, r))
                 chips.addWidget(chip)
@@ -81,8 +83,9 @@ class Note(QFrame):
 
         actions = QHBoxLayout()
         actions.setSpacing(12)
-        for label, slot in self._actions(word):
+        for label, tip, slot in self._actions(word):
             button = QPushButton(label)
+            button.setToolTip(tip)
             button.setObjectName("link")
             button.setCursor(Qt.CursorShape.PointingHandCursor)
             button.clicked.connect(slot)
@@ -91,11 +94,15 @@ class Note(QFrame):
         layout.addLayout(actions)
 
     def _actions(self, word: str):
-        yield "Ignore", lambda: self.window_.ignore(self.issue)
+        yield _("Ignore"), _("Never flag this again for this text"), lambda: self.window_.ignore(self.issue)
         if self.issue.kind == "spelling" and word.strip():
-            yield "Add to dictionary", lambda: self.window_.add_word(word)
+            lang = language_of(self.issue.language)
+            yield (_("Add to dictionary"),
+                   _("Add “{word}” to the {language} dictionary", word=word, language=_(LANGUAGE_NAMES[lang]))
+                   if lang else _("Add “{word}” to the dictionary of all languages", word=word),
+                   lambda: self.window_.add_word(word, lang))
         if self.issue.kind != "spelling":  # one rule covers all spelling: never offer to turn it off
-            yield "Turn off rule", lambda: self.window_.turn_off(self.issue)
+            yield _("Turn off rule"), _("Never apply this rule again"), lambda: self.window_.turn_off(self.issue)
 
     def mousePressEvent(self, e) -> None:
         if e.button() == Qt.MouseButton.LeftButton:
@@ -118,7 +125,7 @@ class Margin(QScrollArea):
         self.setFrameShape(QFrame.Shape.NoFrame)
         self.setMinimumWidth(290)
         self.setMaximumWidth(330)
-        self.show_hint("Issues appear here after a check.")
+        self.show_hint(_("Issues appear here after a check."))
 
     def _fresh(self) -> QVBoxLayout:
         """A new, empty page; :meth:`_attach` shows it once it is filled."""
@@ -141,12 +148,23 @@ class Margin(QScrollArea):
         layout.addWidget(hint)
         self._attach(layout)
 
+    def set_current(self, issue: iss.Issue | None) -> None:
+        """Highlight the note of ``issue`` and scroll to it."""
+        for note in self.widget().findChildren(Note):
+            current = note.issue == issue
+            if note.property("current") != current:
+                note.setProperty("current", current)
+                note.style().unpolish(note)
+                note.style().polish(note)
+            if current:
+                self.ensureWidgetVisible(note, 0, 40)
+
     def show_issues(self, issues: list[iss.Issue], text: str) -> None:
         if not issues:
-            self.show_hint("No issues found.")
+            self.show_hint(_("No issues found."))
             return
         layout = self._fresh()
-        title = QLabel(f"{len(issues)} to review")
+        title = QLabel(_("{n} to review", n=len(issues)))
         bold = QFont(title.font())
         bold.setPointSizeF(bold.pointSizeF() * 1.15)
         bold.setWeight(QFont.Weight.DemiBold)
@@ -157,7 +175,7 @@ class Margin(QScrollArea):
         kinds = self.window_.theme.kinds
         counts = [(k, sum(i.kind == k for i in issues)) for k in iss.KINDS]
         legend = _muted("&nbsp;&nbsp;&nbsp;".join(
-            f"<span style='color:{kinds[k]}'>●</span>&nbsp;{n}&nbsp;{k}" for k, n in counts if n))
+            f"<span style='color:{kinds[k]}'>●</span>&nbsp;{n}&nbsp;{_(k)}" for k, n in counts if n))
         legend.setTextFormat(Qt.TextFormat.RichText)
         legend.setContentsMargins(4, 0, 4, 8)
         layout.addWidget(legend)
@@ -165,7 +183,7 @@ class Margin(QScrollArea):
         for issue in issues[:MAX_NOTES]:
             layout.addWidget(Note(issue, iss.u16_slice(text, issue.offset, issue.end), self.window_))
         if len(issues) > MAX_NOTES:
-            more = _muted(f"{len(issues) - MAX_NOTES} more, shown in the text.")
+            more = _muted(_("{n} more, shown in the text.", n=len(issues) - MAX_NOTES))
             more.setContentsMargins(4, 8, 4, 0)
             layout.addWidget(more)
         self._attach(layout)

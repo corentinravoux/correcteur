@@ -1,4 +1,4 @@
-"""Read LaTeX source as prose plus markup, so that only the prose is checked.
+r"""Read LaTeX source as prose plus markup, so that only the prose is checked.
 
 The result is LanguageTool's *annotated text*: a list of segments, each either
 ``{"text": ...}`` (checked) or ``{"markup": ..., "interpretAs": ...}`` (skipped,
@@ -8,6 +8,10 @@ source exactly, so the positions LanguageTool reports are positions in the sourc
 Maths becomes "X", citations "[1]", references "1". Section titles, emphasis,
 footnotes and captions stay prose. Comments, labels, package and file commands,
 and verbatim-like environments are skipped.
+
+Macros without arguments, defined in the text or in a preamble passed in with
+:func:`parse_macros`, read as what they stand for: ``\newcommand\mnras{MNRAS}``
+makes ``\mnras`` read "MNRAS". A macro that stands for maths or symbols reads "X".
 """
 
 from __future__ import annotations
@@ -23,9 +27,8 @@ MATH_ENVS = {name + star for name in ("equation", "align", "alignat", "gather", 
 SKIP_ENVS = {"verbatim", "verbatim*", "Verbatim", "lstlisting", "minted", "comment", "tikzpicture",
              "filecontents", "filecontents*", "thebibliography"}
 DROP = {"label", "usepackage", "RequirePackage", "documentclass", "bibliographystyle", "bibliography",
-        "addbibresource", "input", "include", "includegraphics", "includeonly", "url", "newcommand",
-        "renewcommand", "providecommand", "newenvironment", "renewenvironment", "DeclareMathOperator",
-        "def", "let", "setlength", "addtolength", "setcounter", "addtocounter", "vspace", "hspace",
+        "addbibresource", "input", "include", "includegraphics", "includeonly", "url",
+        "newenvironment", "renewenvironment", "DeclareMathOperator", "let", "setlength", "addtolength", "setcounter", "addtocounter", "vspace", "hspace",
         "pagestyle", "thispagestyle", "definecolor", "hypersetup", "graphicspath", "newacronym",
         "acrodef", "newtheorem", "linespread", "geometry", "affiliation", "email", "orcid",
         "rule", "raisebox", "phantom", "hphantom", "vphantom", "bibitem", "selectlanguage", "pagenumbering"}
@@ -42,7 +45,8 @@ LAYOUT = {"item", "noindent", "indent", "centering", "raggedright", "raggedleft"
           "twocolumn", "minitoc", "chapter", "section", "subsection", "subsubsection", "paragraph",
           "subparagraph", "part", "caption", "footnote", "emph", "textbf", "textit", "textsc", "textrm",
           "textsf", "texttt", "underline", "mbox", "text", "title", "author", "date", "abstract"}
-FIRST_ARG_MARKUP = {"textcolor", "colorbox", "href", "foreignlanguage", "hyperref", "fcolorbox"}
+FIRST_ARG_MARKUP = {"textcolor", "colorbox", "href", "foreignlanguage", "hyperref", "fcolorbox", "texorpdfstring"}
+DEFINERS = {"newcommand", "renewcommand", "providecommand", "DeclareRobustCommand", "def", "gdef", "edef", "xdef"}
 SYMBOLS = {"ldots": "…", "dots": "…", "textellipsis": "…", "LaTeX": "LaTeX", "TeX": "TeX",
            "textendash": "–", "textemdash": "—", "textquoteright": "’", "textquoteleft": "‘",
            "oe": "œ", "OE": "Œ", "ae": "æ", "AE": "Æ", "ss": "ß", "o": "ø", "O": "Ø", "aa": "å",
@@ -58,6 +62,11 @@ _LOOKS = re.compile(r"\\(?:begin|end|section|subsection|cite\w*|ref|eqref|label|
                     r"footnote|item|frac|usepackage|documentclass)\b|\$[^$\n]+\$")
 _BLANK_LINE = re.compile(r"\n[ \t]*\n")
 _SPACED_LETTER = re.compile(r"[ \t]+(?=[A-Za-z])")
+_NEWCOMMAND = re.compile(r"\\(?:(?:re)?newcommand|providecommand|DeclareRobustCommand)\*?\s*"
+                         r"(?:\{\s*\\([A-Za-z]+)\s*\}|\\([A-Za-z]+))\s*(?:\[(\d)\])?\s*(?:\[[^\]]*\])?\s*(?=\{)")
+_DEF = re.compile(r"\\[gex]?def\s*\\([A-Za-z]+)([^{]*)(?=\{)")
+_COMMENT = re.compile(r"(?<!\\)%.*")
+_PLAIN = re.compile(r"[A-Za-zÀ-ÖØ-öø-ÿŒœ0-9 .,;:'’&/–-]+")
 
 
 def looks_like_latex(text: str) -> bool:
@@ -131,7 +140,36 @@ def _until(src: str, needle: str, start: int) -> int:
     return len(src) if j < 0 else j + len(needle)
 
 
-def annotate(src: str) -> list[dict]:
+def parse_macros(src: str, known: dict[str, str] | None = None) -> dict[str, str]:
+    """Macros without arguments defined in ``src``, each with what it reads as.
+
+    ``known`` holds macros defined earlier (a preamble), usable in these
+    definitions. A macro with arguments is left out: its arguments are prose.
+    """
+    macros = dict(known or {})
+    clean = _COMMENT.sub("", src)
+    found = []
+    for m in _NEWCOMMAND.finditer(clean):
+        found.append((m.start(), m[1] or m[2], m[3] not in (None, "0"), m.end()))
+    for m in _DEF.finditer(clean):
+        found.append((m.start(), m[1], "#" in m[2], m.end()))
+    for _, name, has_args, body_start in sorted(found):
+        if has_args:
+            macros.pop(name, None)
+            continue
+        body = clean[body_start + 1:_group_end(clean, body_start) - 1]
+        macros[name] = _reading(body, macros)
+    return macros
+
+
+def _reading(body: str, macros: dict[str, str]) -> str:
+    text = " ".join(interpreted(annotate(body, macros, parse=False)).split())
+    return text if not text or _PLAIN.fullmatch(text) else MATH
+
+
+def annotate(src: str, macros: dict[str, str] | None = None, parse: bool = True) -> list[dict]:
+    """Split ``src`` into prose and markup; ``macros`` maps macro names to their reading."""
+    macros = parse_macros(src, macros) if parse else (macros or {})
     out = _Segments()
     i, n = 0, len(src)
     while i < n:
@@ -148,7 +186,7 @@ def annotate(src: str) -> list[dict]:
                 j = n if j < 0 else j + 1
             out.markup(src[i:j], MATH)
         elif c == "\\":
-            j = _command(src, i, out)
+            j = _command(src, i, out, macros)
         elif c in "{}":
             j = i + 1
             out.markup(c)
@@ -169,7 +207,7 @@ def annotate(src: str) -> list[dict]:
     return out.items
 
 
-def _command(src: str, i: int, out: _Segments) -> int:
+def _command(src: str, i: int, out: _Segments, macros: dict[str, str]) -> int:
     n = len(src)
     if i + 1 >= n:
         out.markup(src[i:])
@@ -217,9 +255,22 @@ def _command(src: str, i: int, out: _Segments) -> int:
         out.markup(src[i:k])
         return k
     base = name.rstrip("*")
+    if base in DEFINERS:
+        m = (_DEF if base.endswith("def") else _NEWCOMMAND).match(src, i)
+        k = _group_end(src, m.end()) if m else _groups_end(src, j)
+        out.markup(src[i:k])
+        return k
+    if name in macros:
+        k = j + 2 if src.startswith("{}", j) else j
+        out.markup(src[i:k], macros[name])
+        return k
     if base.startswith(("cite", "Cite")) or base in ("parencite", "textcite", "autocite", "footcite"):
         k = _groups_end(src, j)
         out.markup(src[i:k], "[1]")
+        return k
+    if base == "ensuremath":
+        k = _groups_end(src, j)
+        out.markup(src[i:k], MATH)
         return k
     if base in REFS or base in UNITS:
         k = _groups_end(src, j)

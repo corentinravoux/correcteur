@@ -115,6 +115,29 @@ def stylesheet(t: Theme) -> str:
         background: {t.paper}; color: {t.ink}; border: 1px solid {t.rule};
         selection-background-color: {t.hover}; selection-color: {t.ink}; outline: none;
     }}
+    QLineEdit {{
+        background: {t.paper}; color: {t.ink}; border: 1px solid {t.rule}; border-radius: 5px; padding: 5px 8px;
+        selection-background-color: {t.selection}; selection-color: {t.ink};
+    }}
+    QLineEdit:focus {{ border-color: {t.focus}; }}
+    QTreeWidget {{
+        background: {t.paper}; color: {t.ink}; border: 1px solid {t.rule}; border-radius: 6px;
+        alternate-background-color: {t.hover}; outline: none;
+    }}
+    QTreeWidget::item {{ padding: 4px 2px; }}
+    QTreeWidget::item:selected {{ background: {t.selection}; color: {t.ink}; }}
+    QHeaderView::section {{
+        background: {t.paper}; color: {t.muted}; border: none; border-bottom: 1px solid {t.rule};
+        padding: 5px 6px;
+    }}
+    QTabWidget::pane {{ border: none; border-top: 1px solid {t.rule}; }}
+    QTabBar::tab {{
+        background: transparent; color: {t.muted}; padding: 7px 14px; border: none;
+        border-bottom: 2px solid transparent;
+    }}
+    QTabBar::tab:selected {{ color: {t.ink}; border-bottom-color: {t.ink}; }}
+    QTabBar::tab:hover {{ color: {t.ink}; }}
+    QDialog {{ background: {t.desk}; }}
     QCheckBox {{ color: {t.ink}; spacing: 7px; }}
     QCheckBox::indicator {{
         width: 14px; height: 14px; border: 1px solid {t.muted}; border-radius: 3px; background: {t.paper};
@@ -128,6 +151,7 @@ def stylesheet(t: Theme) -> str:
     QScrollArea#margin, QWidget#marginInner {{ background: transparent; border: none; }}
     QFrame#note {{ background: transparent; border: none; border-bottom: 1px solid {t.rule}; }}
     QFrame#note:hover {{ background: {t.hover}; }}
+    QFrame#note[current="true"] {{ background: {t.hover}; border-bottom: 1px solid {t.focus}; }}
 
     QMenu {{ background: {t.paper}; color: {t.ink}; border: 1px solid {t.rule}; padding: 4px; }}
     QMenu::item {{ padding: 5px 20px 5px 12px; border-radius: 4px; }}

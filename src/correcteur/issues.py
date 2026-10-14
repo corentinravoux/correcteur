@@ -27,6 +27,7 @@ class Issue:
     kind: str = "grammar"
     description: str = field(default="", compare=False)  # the rule's name, e.g. "Possible typo"
     source: str = field(default="LanguageTool", compare=False)
+    language: str = field(default="", compare=False)      # code of the paragraph's language, e.g. "fr"
 
     @property
     def end(self) -> int:
@@ -103,22 +104,6 @@ def apply_all(text: str, issues: list[Issue]) -> str:
     return data.decode("utf-16-le")
 
 
-def drop_known(issues: list[Issue], text: str, dictionary: set[str],
-               ignored: set[tuple[str, str]], disabled: set[str] | dict[str, str] = frozenset()) -> list[Issue]:
-    """Remove spelling issues on dictionary words, issues the user ignored, and turned-off rules."""
-    kept = []
-    for issue in issues:
-        if issue.rule_id in disabled:
-            continue
-        word = u16_slice(text, issue.offset, issue.end)
-        if issue.kind == "spelling" and in_dictionary(word, dictionary):
-            continue
-        if (issue.rule_id, word) in ignored:
-            continue
-        kept.append(issue)
-    return kept
-
-
 def in_dictionary(word: str, dictionary: set[str]) -> bool:
     # A word at the start of a sentence is capitalised: accept "Healpy" for "healpy".
     return word in dictionary or (word[:1].isupper() and word[:1].lower() + word[1:] in dictionary)
@@ -129,12 +114,6 @@ def load_dictionary(path: Path) -> set[str]:
         return set()
     lines = path.read_text(encoding="utf-8").splitlines()
     return {w.strip() for w in lines if w.strip() and not w.lstrip().startswith("#")}
-
-
-def add_to_dictionary(path: Path, word: str) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with open(path, "a", encoding="utf-8") as f:
-        f.write(word + "\n")
 
 
 def load_rules(path: Path) -> dict[str, str]:

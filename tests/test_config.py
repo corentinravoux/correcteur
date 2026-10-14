@@ -43,12 +43,14 @@ def test_config_file(tmp_path, monkeypatch):
     path = tmp_path / "config" / "correcteur" / "config.toml"
     path.parent.mkdir(parents=True)
     path.write_text('engine_dir = "~/lt"\nngrams_dir = "~/ng"\nheap = "2g"\n'
-                    'english_variant = "en-GB"\ndictionary = "~/words.txt"\n')
+                    'english_variant = "en-GB"\ndictionary = "~/words.txt"\n'
+                    'latex_preamble = "~/macros.sty"\n')
     cfg = config.load()
     assert cfg.engine_dir == engine
     assert cfg.ngrams_dir == tmp_path / "ng"
     assert (cfg.heap, cfg.english_variant) == ("2g", "en-GB")
     assert cfg.dictionary == tmp_path / "words.txt"
+    assert cfg.latex_preamble == [tmp_path / "macros.sty"]
 
 
 def test_unknown_key_is_an_error(tmp_path):

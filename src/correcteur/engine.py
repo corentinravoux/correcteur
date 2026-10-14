@@ -17,6 +17,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 
@@ -30,6 +31,11 @@ class EngineError(RuntimeError):
 
 
 LANGUAGES = ("fr", "en")  # Auto picks between these
+SHORT_WORDS = 8           # a paragraph shorter than this follows the text's main language
+
+
+def _reading(part: str | list[dict]) -> str:
+    return part if isinstance(part, str) else latex.interpreted(part)
 
 
 @dataclass
@@ -88,21 +94,27 @@ def check_chunks(base_url: str, chunks, language: str = "auto", picky: bool = Fa
                  english_variant: str = "en-US", disabled=()) -> CheckResult:
     """Check (offset, text) pieces one by one; with "auto", each gets its own language.
 
-    Detection is unreliable on short pieces such as headings. A piece detected as
-    neither French nor English is checked again in the language most other pieces
-    have, or in English when there is none.
+    Detection is unreliable on short pieces such as headings. A short piece, or one
+    detected as neither French nor English, is checked again in the language most
+    of the longer pieces have, if that differs. When all pieces are short, only
+    those in another language are checked again, in the most common of French and
+    English (English when there is none).
     """
     chunks = list(chunks)
     results = [check_text(base_url, part, language, picky, english_variant, disabled) for _, part in chunks]
     if language == "auto":
-        known = [r.code for r in results if r.code.split("-")[0] in LANGUAGES]
+        short = [len(_reading(part).split()) < SHORT_WORDS for _, part in chunks]
+        trusted = [r.code for r, s in zip(results, short) if not s and r.code.split("-")[0] in LANGUAGES]
+        known = trusted or [r.code for r in results if r.code.split("-")[0] in LANGUAGES]
         fallback = max(set(known), key=known.count) if known else english_variant
-        results = [r if r.code.split("-")[0] in LANGUAGES
-                   else check_text(base_url, part, fallback, picky, english_variant, disabled)
-                   for r, (_, part) in zip(results, chunks)]
+        if not trusted:  # only short pieces: no main language to follow
+            short = [False] * len(chunks)
+        results = [check_text(base_url, part, fallback, picky, english_variant, disabled)
+                   if (s or r.code.split("-")[0] not in LANGUAGES) and r.code != fallback else r
+                   for r, s, (_, part) in zip(results, short, chunks)]
     issues, languages, incomplete, parts = [], [], False, []
     for (offset, part), result in zip(chunks, results):
-        issues += [replace(i, offset=i.offset + offset) for i in result.issues]
+        issues += [replace(i, offset=i.offset + offset, language=result.code) for i in result.issues]
         parts.append((offset, offset + u16_len(part if isinstance(part, str) else latex.source(part)), result.code))
         if result.language and result.language not in languages:
             languages.append(result.language)
@@ -152,6 +164,7 @@ class LanguageTool:
         self.french: french.Grammalecte | None = None
         self.french_error = ""
         self._french_tried = False
+        self._macros: tuple[tuple, dict[str, str]] = ((), {})
         self._workdir: Path | None = None
 
     @property
@@ -206,6 +219,17 @@ class LanguageTool:
                 time.sleep(0.25)
         raise EngineError(f"LanguageTool did not start within {timeout:.0f} s:\n{self.log_tail()}")
 
+    def macros(self) -> dict[str, str]:
+        """Macros from the configured preamble files, read again when a file changes."""
+        files = [p for p in self.config.latex_preamble if p.is_file()]
+        stamp = tuple((str(p), p.stat().st_mtime) for p in files)
+        if stamp != self._macros[0]:
+            macros: dict[str, str] = {}
+            for path in files:
+                macros = latex.parse_macros(path.read_text(encoding="utf-8", errors="replace"), macros)
+            self._macros = (stamp, macros)
+        return self._macros[1]
+
     @property
     def engines(self) -> list[str]:
         return ["LanguageTool"] + (["Grammalecte"] if self.french else [])
@@ -223,9 +247,21 @@ class LanguageTool:
             self.french_error = f"Grammalecte could not be loaded: {e}"
 
     def warm_up(self) -> None:
-        """Load the French and English rules now, so the first real check is quick."""
-        self.check("Ceci est un essai.", "fr")
-        self.check("This is a test.", self.config.english_variant)
+        """Load the French and English rules now, so the first real check is quick.
+
+        Both languages load at the same time (LanguageTool serves requests in
+        parallel), with Grammalecte alongside. The sentences contain errors, so
+        that building suggestions is warm too.
+        """
+        jobs = [("Il ont faim et je doit partir.", "fr"),
+                ("This are a tset of the the engine.", self.config.english_variant)]
+        with ThreadPoolExecutor(max_workers=3) as pool:
+            french_loaded = pool.submit(self.load_french)
+            checks = [pool.submit(check_text, self.url, text, lang) for text, lang in jobs]
+            for job in (french_loaded, *checks):
+                job.result()
+        if self.french:
+            self.french.check("Il ont faim et je doit partir.")
 
     def check(self, text: str, language: str = "auto", picky: bool = False, disabled=(),
               tex: bool = False) -> CheckResult:
@@ -234,7 +270,7 @@ class LanguageTool:
         self.load_french()
         variant = self.config.english_variant
         if tex:
-            segments = latex.annotate(text)
+            segments = latex.annotate(text, self.macros())
             result = check_latex(self.url, text, language, picky, variant, disabled, segments)
             base, spans = latex.mask(segments), latex.markup_spans(segments)
         else:

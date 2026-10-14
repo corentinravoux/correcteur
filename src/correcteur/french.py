@@ -70,4 +70,5 @@ class Grammalecte:
             kind=kind_of(option),
             description=self.labels.get(option, [option])[0],
             source="Grammalecte",
+            language="fr",
         )

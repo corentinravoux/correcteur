@@ -125,7 +125,26 @@ def test_check_latex_sends_annotation_and_protects_markup(server):
 
 
 def test_auto_rechecks_other_languages(server):
-    text = "Il ont mangé des pomme.\n\nCatalan heading\n\nIl ont mangé des pomme."
+    long = "Il ont mangé des pomme hier soir avec les amis."
+    text = f"{long}\n\nCatalan words in a long paragraph here\n\n{long}"
     result = check_paragraphs(server, text)
     assert [r["language"] for r in FakeLanguageTool.requests] == ["auto", "auto", "auto", "fr"]
     assert result.language == "French"
+
+
+def test_auto_short_paragraphs_follow_the_text(server):
+    long = "Il ont mangé des pomme hier soir avec les amis."
+    check_paragraphs(server, f"Catalan title\n\n{long}")
+    # The title is short: checked again in French, the language of the long paragraph.
+    assert [r["language"] for r in FakeLanguageTool.requests] == ["auto", "auto", "fr"]
+
+
+def test_macros_follow_the_preamble_file(tmp_path):
+    preamble = tmp_path / "macros.sty"
+    preamble.write_text("\\newcommand\\desi{DESI}\n")
+    lt = LanguageTool(Config(engine_dir=None, latex_preamble=[preamble, tmp_path / "missing.sty"]))
+    assert lt.macros() == {"desi": "DESI"}
+    preamble.write_text("\\newcommand\\desi{DESI}\n\\newcommand\\ztf{ZTF}\n")
+    import os
+    os.utime(preamble, (1, 1))  # a different modification time
+    assert lt.macros() == {"desi": "DESI", "ztf": "ZTF"}

@@ -67,3 +67,36 @@ def test_looks_like_latex():
     assert latex.looks_like_latex("On pose $a$ et $b$.")
     assert not latex.looks_like_latex("Il coûte 5 $ et c'est tout.")
     assert not latex.looks_like_latex("Plain text with a back\\slash.")
+
+
+PREAMBLE = r"""
+\newcommand\mnras{MNRAS}             % Monthly Notices
+\newcommand{\lcdm}{$\Lambda\mathrm{CDM}$}
+\newcommand{\lcdmnu}{\ensuremath{\Lambda\mathrm{CDM}\nu}}
+\newcommand{\lcdmtitle}{\texorpdfstring{$\Lambda$}{Λ}CDM}
+\renewcommand*{\desi}{DESI}
+\providecommand{\aap}{A\&A}
+\def\ie{i.e.}
+\newcommand{\com}[1]{\textcolor{blue}{#1}}
+\newcommand{\both}{\desi{} et \mnras}
+% \newcommand{\commented}{Nope}
+"""
+
+
+def test_parse_macros():
+    macros = latex.parse_macros(PREAMBLE)
+    assert macros == {"mnras": "MNRAS", "lcdm": "X", "lcdmnu": "X", "lcdmtitle": "X", "desi": "DESI",
+                      "aap": "A&A", "ie": "i.e.", "both": "DESI et MNRAS"}
+
+
+def test_macros_in_text():
+    macros = latex.parse_macros(PREAMBLE)
+    src = r"Le modèle \lcdm{} et \lcdm, dans \mnras. \com{Une note.}"
+    assert read_with(src, macros) == "Le modèle X et X, dans MNRAS. Une note."
+    defined_here = "\\newcommand\\survey{DESI}\n\\def\\eg{e.g.}\nLe relevé \\survey, \\eg ici."
+    assert read_with(defined_here, {}) == "\n\nLe relevé DESI, e.g. ici."
+    assert latex.source(latex.annotate(defined_here)) == defined_here
+
+
+def read_with(src, macros):
+    return latex.interpreted(latex.annotate(src, macros))

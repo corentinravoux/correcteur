@@ -15,3 +15,10 @@ First release.
 - Personal dictionary, and rules that can be turned off and back on.
 - `correcteur --check FILE` prints the issues without opening the window.
 - `correcteur --download` fetches LanguageTool, its n-gram data and Grammalecte.
+- LaTeX macros without arguments read as what they stand for, from the text
+  and from the files in `latex_preamble`.
+- A dictionary for each language besides the shared one; ignored issues are
+  remembered across sessions; the Exceptions window lists and undoes them.
+- Keyboard review: `F8` walks through the issues with their menus.
+- French interface, following the system language.
+- Faster start: French and English rules load in parallel.

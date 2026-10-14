@@ -5,19 +5,23 @@ from __future__ import annotations
 import sys
 from concurrent.futures import ThreadPoolExecutor
 
-from PySide6.QtCore import QEvent, QObject, QPoint, QSettings, Qt, QTimer, Signal
+from PySide6.QtCore import QEvent, QLibraryInfo, QObject, QPoint, QSettings, Qt, QTimer, QTranslator, Signal
 from PySide6.QtGui import (QColor, QFont, QGuiApplication, QHelpEvent, QIcon, QKeySequence, QShortcut,
                            QTextCharFormat, QTextCursor)
-from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QDialog, QDialogButtonBox, QHBoxLayout,
-                               QLabel, QMainWindow, QMenu, QMessageBox, QPlainTextEdit, QPushButton, QScrollArea,
-                               QStyleFactory, QTextEdit, QToolTip, QVBoxLayout, QWidget, QWidgetAction)
+from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QHBoxLayout, QLabel, QMainWindow, QMenu,
+                               QMessageBox, QPlainTextEdit, QPushButton, QStyleFactory, QTextEdit, QToolTip,
+                               QVBoxLayout, QWidget, QWidgetAction)
 
 from . import issues as iss
 from . import theme as th
+from . import i18n
+from .i18n import _, language_name, ngettext
 from .latex import looks_like_latex
 from .config import Config, load
+from .dialogs import ExceptionsDialog
 from .engine import CheckResult, EngineError, LanguageTool
 from .margin import Margin, shown
+from .userdata import LANGUAGE_NAMES, UserData, language_of
 
 LANGUAGES = [("Auto", "auto"), ("Français", "fr"), ("English (US)", "en-US"), ("English (UK)", "en-GB")]
 MAX_SUGGESTIONS = 7
@@ -101,6 +105,11 @@ class Editor(QPlainTextEdit):
                 self.window_.show_menu(issue, self.viewport().mapToGlobal(below))
 
     def contextMenuEvent(self, e) -> None:
+        if e.reason() == e.Reason.Keyboard:  # the Menu key or Shift+F10: the issue at the cursor
+            issue = self.window_.current_issue()
+            if issue:
+                self.window_.show_menu(issue, self.window_.below(issue), keyboard=True)
+                return
         issue = self.issue_at(e.pos())
         if issue:
             self.window_.show_menu(issue, e.globalPos())
@@ -108,72 +117,29 @@ class Editor(QPlainTextEdit):
             super().contextMenuEvent(e)
 
 
-class RulesDialog(QDialog):
-    """The rules the user turned off, each with a button to turn it back on."""
-
-    def __init__(self, window: Window):
-        super().__init__(window)
-        self.window_ = window
-        self.setWindowTitle("Rules turned off")
-        self.setMinimumWidth(460)
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(18, 16, 18, 14)
-        intro = QLabel("Correcteur never flags these rules. Turn one back on to see its issues "
-                       "at the next check.")
-        intro.setWordWrap(True)
-        intro.setProperty("muted", True)
-        layout.addWidget(intro)
-        self.rows = QVBoxLayout()
-        self.rows.setSpacing(2)
-        page = QWidget()
-        page.setObjectName("marginInner")
-        page.setLayout(self.rows)
-        scroll = QScrollArea()
-        scroll.setObjectName("margin")
-        scroll.setWidgetResizable(True)
-        scroll.setWidget(page)
-        layout.addWidget(scroll, 1)
-        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
-        buttons.rejected.connect(self.reject)
-        layout.addWidget(buttons)
-        self._fill()
-
-    def _fill(self) -> None:
-        while self.rows.count():
-            item = self.rows.takeAt(0)
-            if item.widget():
-                item.widget().deleteLater()
-        for rule, description in sorted(self.window_.disabled.items(), key=lambda r: r[1].lower()):
-            row = QHBoxLayout()
-            label = QLabel(f"{description or rule}<br><span style='color:{self.window_.theme.muted}'>{rule}</span>")
-            label.setTextFormat(Qt.TextFormat.RichText)
-            label.setWordWrap(True)
-            button = QPushButton("Turn on")
-            button.clicked.connect(lambda _=False, r=rule: (self.window_.turn_on(r), self._fill()))
-            row.addWidget(label, 1)
-            row.addWidget(button)
-            holder = QWidget()
-            holder.setLayout(row)
-            self.rows.addWidget(holder)
-        if not self.window_.disabled:
-            empty = QLabel("No rule is turned off.")
-            empty.setProperty("muted", True)
-            self.rows.addWidget(empty)
-        self.rows.addStretch()
+def _install_qt_french() -> None:
+    """Translate Qt's own words, such as "Close" in dialogs, once per application."""
+    app = QApplication.instance()
+    if app is None or app.property("correcteur_fr"):
+        return
+    translator = QTranslator(app)
+    if translator.load("qtbase_fr", QLibraryInfo.path(QLibraryInfo.LibraryPath.TranslationsPath)):
+        app.installTranslator(translator)
+        app.setProperty("correcteur_fr", True)
 
 
 class Window(QMainWindow):
     def __init__(self, config: Config, engine: LanguageTool | None = None):
         super().__init__()
+        if i18n.setup(config.interface) == "fr":
+            _install_qt_french()
         self.config = config
         self.engine = engine or LanguageTool(config)
         self.pool = ThreadPoolExecutor(max_workers=1)  # one worker: checks run in order, after start-up
         self.engine_state = "starting"  # starting, ready, failed
         self.language = ""
         self.note = ""
-        self.dictionary = iss.load_dictionary(config.dictionary)
-        self.ignored: set[tuple[str, str]] = set()
-        self.disabled = iss.load_rules(config.disabled_rules)
+        self.user = UserData(config)
         self.settings = QSettings("correcteur", "correcteur")
         self.theme = th.current()
 
@@ -201,38 +167,38 @@ class Window(QMainWindow):
             self.restoreGeometry(geometry)
 
         self.editor = Editor(self)
-        self.editor.setPlaceholderText("Paste your text here, then press Check.\n\n"
-                                       "Underlined words have a suggestion: click one to fix it.")
+        self.editor.setPlaceholderText(_("Paste your text here, then press Check.\n\n"
+                                         "Underlined words have a suggestion: click one to fix it."))
         self.margin = Margin(self)
 
         self.lang_box = QComboBox()
         for label, code in LANGUAGES:
-            self.lang_box.addItem(label, code)
+            self.lang_box.addItem(_(label), code)
         self.lang_box.setCurrentIndex(self.settings.value("language", 0, type=int))
-        self.lang_box.setToolTip("Auto detects the language of each paragraph")
-        self.picky_box = QCheckBox("Style suggestions")
-        self.picky_box.setToolTip("Also flag wordiness, repetitions and other matters of style")
+        self.lang_box.setToolTip(_("Auto detects the language of each paragraph"))
+        self.picky_box = QCheckBox(_("Style suggestions"))
+        self.picky_box.setToolTip(_("Also flag wordiness, repetitions and other matters of style"))
         self.picky_box.setChecked(self.settings.value("picky", "false") == "true")
         self.latex_box = QCheckBox("LaTeX")
-        self.latex_box.setToolTip("Skip LaTeX commands, maths and comments; check only the prose.\n"
-                                  "Ticked automatically when pasted text looks like LaTeX.")
+        self.latex_box.setToolTip(_("Skip LaTeX commands, maths and comments; check only the prose.\n"
+                                    "Ticked automatically when pasted text looks like LaTeX."))
         self.latex_box.setChecked(self.settings.value("latex", "false") == "true")
 
-        self.paste_button = self._button("Paste && check", "Replace the text with the clipboard and check it",
+        self.paste_button = self._button(_("Paste && check"), _("Replace the text with the clipboard and check it"),
                                          "Ctrl+Shift+V", self.paste_and_check)
-        self.check_button = self._button("Check", "Check the text", "Ctrl+Return", self.check)
+        self.check_button = self._button(_("Check"), _("Check the text"), "Ctrl+Return", self.check)
         self.check_button.setObjectName("primary")
-        self.accept_button = self._button("Accept all", "Apply the first suggestion of every issue; "
-                                          "Ctrl+Z undoes it", None, self.accept_all)
-        self.copy_button = self._button("Copy text", "Copy the whole text to the clipboard",
+        self.accept_button = self._button(_("Accept all"), _("Apply the first suggestion of every issue; "
+                                                             "Ctrl+Z undoes it"), None, self.accept_all)
+        self.copy_button = self._button(_("Copy text"), _("Copy the whole text to the clipboard"),
                                         "Ctrl+Shift+C", self.copy)
         self.status = QLabel()
         self.status.setProperty("muted", True)
-        self.rules_button = QPushButton()
-        self.rules_button.setObjectName("link")
-        self.rules_button.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.rules_button.setToolTip("See the rules you turned off, and turn them back on")
-        self.rules_button.clicked.connect(lambda: RulesDialog(self).exec())
+        self.exceptions_button = QPushButton()
+        self.exceptions_button.setObjectName("link")
+        self.exceptions_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.exceptions_button.setToolTip(_("Rules turned off, ignored issues and dictionary words"))
+        self.exceptions_button.clicked.connect(lambda: ExceptionsDialog(self).exec())
 
         top = QHBoxLayout()
         top.setSpacing(10)
@@ -253,7 +219,7 @@ class Window(QMainWindow):
         bottom.setSpacing(10)
         bottom.addWidget(self.status)
         bottom.addSpacing(10)
-        bottom.addWidget(self.rules_button)
+        bottom.addWidget(self.exceptions_button)
         bottom.addStretch(1)
         bottom.addWidget(self.accept_button)
         bottom.addWidget(self.copy_button)
@@ -270,8 +236,9 @@ class Window(QMainWindow):
         self.setCentralWidget(desk)
 
         QShortcut(QKeySequence("Ctrl+Enter"), self, self.check)  # keypad Enter
-        QShortcut(QKeySequence("F8"), self, self.next_issue)
-        QShortcut(QKeySequence("Shift+F8"), self, lambda: self.next_issue(backwards=True))
+        QShortcut(QKeySequence("F8"), self, lambda: self.next_issue(menu=True))
+        QShortcut(QKeySequence("Shift+F8"), self, lambda: self.next_issue(backwards=True, menu=True))
+        self.editor.cursorPositionChanged.connect(lambda: self.margin.set_current(self.current_issue()))
         self.editor.setFocus()
         self.update_status()
 
@@ -321,25 +288,25 @@ class Window(QMainWindow):
     def _engine_ready(self) -> None:
         if self.engine_state == "starting":
             self.engine_state = "ready"
-        self.update_status(keep_note=self.note == "Starting LanguageTool, then checking…")
+        self.update_status(keep_note=self.note == _("Starting LanguageTool, then checking…"))
 
     def _engine_failed(self, message: str) -> None:
         self.engine_state = "failed"
         self.update_status()
-        QMessageBox.critical(self, "LanguageTool did not start", message)
+        QMessageBox.critical(self, _("LanguageTool did not start"), message)
 
     # ----- checking -----------------------------------------------------
     def check(self) -> None:
         text = self.editor.toPlainText()
         if self.engine_state == "failed":
-            self.note = "LanguageTool is not running. Close Correcteur and open it again."
+            self.note = _("LanguageTool is not running. Close Correcteur and open it again.")
         elif not text.strip():
-            self.note = "Nothing to check yet: paste or type some text."
+            self.note = _("Nothing to check yet: paste or type some text.")
         else:
-            self.note = "Checking…" if self.engine_state == "ready" else "Starting LanguageTool, then checking…"
+            self.note = _("Checking…") if self.engine_state == "ready" else _("Starting LanguageTool, then checking…")
             self.check_button.setEnabled(False)
             self.pool.submit(self._run_check, text, self.lang_box.currentData(), self.picky_box.isChecked(),
-                             set(self.disabled), self.latex_box.isChecked())
+                             set(self.user.rules), self.latex_box.isChecked())
         self.update_status(keep_note=True)
 
     def _run_check(self, text: str, language: str, picky: bool, disabled: set[str], tex: bool) -> None:
@@ -353,23 +320,25 @@ class Window(QMainWindow):
     def _checked(self, text: str, result: CheckResult) -> None:
         self.check_button.setEnabled(True)
         if self.editor.toPlainText() != text:
-            self.note = "The text changed during the check. Press Check again."
+            self.note = _("The text changed during the check. Press Check again.")
             self.update_status(keep_note=True)
             return
-        self.editor.set_issues(iss.drop_known(result.issues, text, self.dictionary, self.ignored, self.disabled))
+        self.editor.set_issues(self.user.filter(result.issues, text))
         self.language = result.language
-        self.note = "Some results are missing: the text may be too long." if result.incomplete else ""
+        self.note = _("Some results are missing: the text may be too long.") if result.incomplete else ""
         self.update_status(keep_note=bool(self.note))
         self.refresh_margin()
 
     def _check_failed(self, message: str) -> None:
         self.check_button.setEnabled(True)
-        self.note = "The check failed."
+        self.note = _("The check failed.")
         self.update_status(keep_note=True)
-        QMessageBox.warning(self, "The check failed", message)
+        QMessageBox.warning(self, _("The check failed"), message)
 
     # ----- fixing -------------------------------------------------------
-    def show_menu(self, issue: iss.Issue, where: QPoint) -> None:
+    def show_menu(self, issue: iss.Issue, where: QPoint, keyboard: bool = False) -> None:
+        """The issue's menu. From the keyboard, Enter applies the first suggestion and
+        the next issue's menu opens; Esc stops."""
         menu = QMenu(self)
         header = QLabel(issue.message)
         header.setWordWrap(True)
@@ -383,20 +352,38 @@ class Window(QMainWindow):
         menu.addSeparator()
         bold = QFont(menu.font())
         bold.setBold(True)
+        first = None
         for replacement in issue.replacements[:MAX_SUGGESTIONS]:
-            act = menu.addAction(shown(replacement))
+            act = menu.addAction(shown(replacement).replace("&", "&&"))
             act.setFont(bold)
             act.triggered.connect(lambda _=False, r=replacement: self.apply(issue, r))
+            first = first or act
         if not issue.replacements:
-            menu.addAction("No suggestion").setEnabled(False)
+            menu.addAction(_("No suggestion")).setEnabled(False)
         menu.addSeparator()
-        menu.addAction("Ignore", lambda: self.ignore(issue))
+        if keyboard:
+            menu.addAction(_("&Skip"), lambda: None)
+        menu.addAction(_("&Ignore"), lambda: self.ignore(issue))
         word = iss.u16_slice(self.editor.toPlainText(), issue.offset, issue.end)
+        quoted = word.replace("&", "&&")
         if issue.kind == "spelling" and word.strip():
-            menu.addAction(f"Add “{word}” to dictionary", lambda: self.add_word(word))
+            lang = language_of(issue.language)
+            if lang:
+                menu.addAction(_("&Add “{word}” to the {language} dictionary", word=quoted,
+                                 language=_(LANGUAGE_NAMES[lang])), lambda: self.add_word(word, lang))
+            menu.addAction(_("Add “{word}” to the dictionary of all &languages", word=quoted),
+                           lambda: self.add_word(word, ""))
         if issue.kind != "spelling":  # one rule covers all spelling: never offer to turn it off
-            menu.addAction("Turn off this rule", lambda: self.turn_off(issue))
-        menu.exec(where)
+            menu.addAction(_("&Turn off this rule"), lambda: self.turn_off(issue))
+        if keyboard and first:
+            menu.setActiveAction(first)
+        chosen = self.run_menu(menu, where)
+        if keyboard and chosen is not None:
+            QTimer.singleShot(0, lambda: self.next_issue(menu=True))
+
+    def run_menu(self, menu: QMenu, where: QPoint):
+        """Show ``menu`` and return the chosen action (a seam for the tests)."""
+        return menu.exec(where)
 
     def apply(self, issue: iss.Issue, replacement: str) -> None:
         self.editor.span(issue).insertText(replacement)
@@ -407,22 +394,40 @@ class Window(QMainWindow):
         self.editor.ensureCursorVisible()
         self.editor.setFocus()
 
-    def next_issue(self, backwards: bool = False) -> None:
+    def next_issue(self, backwards: bool = False, menu: bool = False) -> None:
+        """Select the next (or previous) issue, wrapping around; with ``menu``, open its menu."""
         if not self.editor.issues:
+            if menu:
+                self.note = _("No issue left.")
+                self.update_status(keep_note=True)
             return
-        here = self.editor.textCursor().selectionStart() if backwards else self.editor.textCursor().selectionEnd()
+        cursor = self.editor.textCursor()
         ordered = sorted(self.editor.issues, key=lambda i: i.offset)
         if backwards:
-            before = [i for i in ordered if i.offset < here]
-            self.reveal(before[-1] if before else ordered[-1])
+            before = [i for i in ordered if i.offset < cursor.selectionStart()]
+            target = before[-1] if before else ordered[-1]
         else:
-            after = [i for i in ordered if i.offset >= here]
-            self.reveal(after[0] if after else ordered[0])
+            after = [i for i in ordered if i.offset >= cursor.selectionEnd()]
+            target = after[0] if after else ordered[0]
+        self.reveal(target)
+        if menu:
+            self.note = _("Enter applies the suggestion, the arrows choose another, Esc stops.")
+            self.update_status(keep_note=True)
+            QTimer.singleShot(0, lambda: self.show_menu(target, self.below(target), keyboard=True))
+
+    def current_issue(self) -> iss.Issue | None:
+        """The issue under the cursor or selection."""
+        cursor = self.editor.textCursor()
+        start, end = cursor.selectionStart(), cursor.selectionEnd()
+        return next((i for i in self.editor.issues if i.offset <= start and end <= i.end), None)
+
+    def below(self, issue: iss.Issue) -> QPoint:
+        return self.editor.viewport().mapToGlobal(self.editor.cursorRect(self.editor.span(issue)).bottomLeft())
 
     def accept_all(self) -> None:
         chosen = iss.non_overlapping(self.editor.issues)
         if not chosen:
-            self.note = "No suggestion to apply."
+            self.note = _("No suggestion to apply.")
             self.update_status(keep_note=True)
             return
         cursor = QTextCursor(self.editor.document())
@@ -433,35 +438,33 @@ class Window(QMainWindow):
             cursor.setPosition(span.position(), QTextCursor.MoveMode.KeepAnchor)
             cursor.insertText(issue.replacements[0])
         cursor.endEditBlock()
-        self.note = f"Applied {len(chosen)} suggestion{'s' if len(chosen) > 1 else ''}. Ctrl+Z undoes them."
+        self.note = ngettext("Applied {n} suggestion. Ctrl+Z undoes it.",
+                             "Applied {n} suggestions. Ctrl+Z undoes them.", len(chosen))
         self.update_status(keep_note=True)
 
     def ignore(self, issue: iss.Issue) -> None:
         word = iss.u16_slice(self.editor.toPlainText(), issue.offset, issue.end)
-        self.ignored.add((issue.rule_id, word))
-        self.editor.set_issues([i for i in self.editor.issues if i != issue])
-        self.issues_changed()
+        self.user.ignore(issue.rule_id, word, issue.description or issue.message)
+        self.refilter()
 
-    def add_word(self, word: str) -> None:
-        iss.add_to_dictionary(self.config.dictionary, word)
-        self.dictionary.add(word)
-        text = self.editor.toPlainText()
-        self.editor.set_issues(iss.drop_known(self.editor.issues, text, self.dictionary, set()))
-        self.issues_changed()
+    def add_word(self, word: str, lang: str = "") -> None:
+        """Add ``word`` to the dictionary of ``lang``, or of all languages."""
+        self.user.add_word(word, lang)
+        self.refilter()
 
     def turn_off(self, issue: iss.Issue) -> None:
-        self.disabled[issue.rule_id] = issue.description or issue.message
-        iss.save_rules(self.config.disabled_rules, self.disabled)
-        self.editor.set_issues([i for i in self.editor.issues if i.rule_id != issue.rule_id])
-        self.issues_changed()
-        self.note = f"Turned off “{issue.description or issue.rule_id}”."
+        self.user.disable_rule(issue.rule_id, issue.description or issue.message)
+        self.refilter()
+        self.note = _("Turned off “{rule}”.", rule=issue.description or issue.rule_id)
         self.update_status(keep_note=True)
 
-    def turn_on(self, rule: str) -> None:
-        self.disabled.pop(rule, None)
-        iss.save_rules(self.config.disabled_rules, self.disabled)
-        self.note = "Rule turned back on. Check again to see its issues."
-        self.update_status(keep_note=True)
+    def refilter(self) -> None:
+        """Hide the issues the user's exceptions now cover."""
+        self.editor.set_issues(self.user.filter(self.editor.issues, self.editor.toPlainText()))
+        self.issues_changed()
+
+    def exceptions_changed(self) -> None:
+        self.refilter()
 
     def issues_changed(self) -> None:
         self.update_status()
@@ -470,15 +473,16 @@ class Window(QMainWindow):
     def refresh_margin(self) -> None:
         self.margin_timer.stop()
         if not self.language:
-            self.margin.show_hint("Issues appear here after a check.")
+            self.margin.show_hint(_("Issues appear here after a check."))
         else:
             self.margin.show_issues(self.editor.issues, self.editor.toPlainText())
+            self.margin.set_current(self.current_issue())
 
     # ----- clipboard ----------------------------------------------------
     def paste_and_check(self) -> None:
         text = QGuiApplication.clipboard().text()
         if not text:
-            self.note = "The clipboard is empty."
+            self.note = _("The clipboard is empty.")
             self.update_status(keep_note=True)
             return
         self.editor.set_issues([])
@@ -488,12 +492,12 @@ class Window(QMainWindow):
             self.latex_box.setChecked(True)
         self.check()
         if detected:
-            self.note = "LaTeX detected: commands and maths are skipped. Checking…"
+            self.note = _("LaTeX detected: commands and maths are skipped. Checking…")
             self.update_status(keep_note=True)
 
     def copy(self) -> None:
         QGuiApplication.clipboard().setText(self.editor.toPlainText())
-        self.note = "Text copied."
+        self.note = _("Text copied.")
         self.update_status(keep_note=True)
 
     # ----- status -------------------------------------------------------
@@ -503,20 +507,20 @@ class Window(QMainWindow):
         if self.note:
             text = self.note
         elif self.engine_state == "failed":
-            text = "LanguageTool is not running."
+            text = _("LanguageTool is not running.")
         elif self.engine_state == "starting" and not self.language:
-            text = "Starting LanguageTool…"
+            text = _("Starting LanguageTool…")
         elif not self.language:
             engines = getattr(self.engine, "engines", ["LanguageTool"])
-            text = f"Ready to check with {' and '.join(engines)}."
+            text = _("Ready to check with {engines}.", engines=_(" and ").join(engines))
         else:
             n = len(self.editor.issues)
-            count = "No issues" if n == 0 else f"{n} issue{'s' if n > 1 else ''}"
-            text = f"{count} in {self.language.replace(' + ', ' and ')}"
+            language = _(" and ").join(language_name(x) for x in self.language.split(" + "))
+            text = (_("No issues in {language}", language=language) if n == 0 else
+                    ngettext("{n} issue in {language}", "{n} issues in {language}", n, language=language))
         self.status.setText(text)
-        n = len(self.disabled)
-        self.rules_button.setText(f"{n} rule{'s' if n > 1 else ''} off")
-        self.rules_button.setVisible(n > 0)
+        n = len(self.user.rules) + len(self.user.ignored)
+        self.exceptions_button.setText(_("Exceptions ({n})", n=n) if n else _("Exceptions"))
         self.accept_button.setEnabled(any(i.replacements for i in self.editor.issues))
 
     def closeEvent(self, e) -> None:
@@ -538,7 +542,7 @@ def main() -> None:
     try:
         config = load()
     except (ValueError, OSError) as e:
-        QMessageBox.critical(None, "Configuration error", str(e))
+        QMessageBox.critical(None, _("Configuration error"), str(e))
         sys.exit(1)
     window = Window(config)
     window.show()

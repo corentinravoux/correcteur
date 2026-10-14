@@ -60,32 +60,6 @@ def test_utf16_offsets_outside_bmp():
     assert iss.apply_all(text, [Issue(10, 3, "", ["the"])]) == "Let 𝑥 be the value."
 
 
-def test_drop_known():
-    text = "Healpix and fsigma8 are fine, teh is not."
-    found = [Issue(0, 7, "", kind="spelling"), Issue(12, 7, "", kind="spelling"),
-             Issue(30, 3, "", ["the"], rule_id="TYPO", kind="spelling")]
-    kept = iss.drop_known(found, text, {"healpix", "fsigma8"}, set())
-    assert kept == [found[2]]
-    assert iss.drop_known(found, text, set(), {("TYPO", "teh")}) == found[:2]
-    # The dictionary only silences spelling issues.
-    grammar = Issue(0, 7, "", kind="grammar")
-    assert iss.drop_known([grammar], text, {"Healpix"}, set()) == [grammar]
-
-
-def test_dictionary_file(tmp_path):
-    path = tmp_path / "sub" / "dictionary.txt"
-    assert iss.load_dictionary(path) == set()
-    iss.add_to_dictionary(path, "HEALPix")
-    iss.add_to_dictionary(path, "Lyα")
-    path.write_text(path.read_text() + "# comment\n\n")
-    assert iss.load_dictionary(path) == {"HEALPix", "Lyα"}
-
-
-def test_drop_disabled_rules():
-    found = [Issue(0, 2, "", rule_id="A"), Issue(3, 2, "", rule_id="B")]
-    assert iss.drop_known(found, "ab cd", set(), set(), {"A": "Rule A"}) == [found[1]]
-
-
 def test_rules_file(tmp_path):
     path = tmp_path / "rules.txt"
     assert iss.load_rules(path) == {}

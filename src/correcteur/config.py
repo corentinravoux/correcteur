@@ -9,8 +9,11 @@ Settings are read from ``~/.config/correcteur/config.toml`` (all keys optional):
     english_variant = "en-US"
     dictionary = "~/.config/correcteur/dictionary.txt"
     disabled_rules = "~/.config/correcteur/disabled-rules.txt"
+    ignored = "~/.config/correcteur/ignored.txt"
     grammalecte = true                        # use Grammalecte on French text when installed
     grammalecte_dir = "~/.local/share/correcteur/grammalecte"
+    latex_preamble = ["~/thesis/macros.sty"]   # files whose \newcommand macros LaTeX mode knows
+    interface = "auto"                        # "fr", "en", or "auto" for the system language
 
 Without a config file, the engine is looked up in ``~/.local/share/correcteur``,
 which is where ``correcteur --download`` puts it.
@@ -21,12 +24,12 @@ from __future__ import annotations
 import os
 import re
 import tomllib
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 SERVER_JAR = "languagetool-server.jar"
 KEYS = {"engine_dir", "ngrams_dir", "java", "heap", "english_variant", "dictionary", "disabled_rules",
-        "grammalecte", "grammalecte_dir"}
+        "grammalecte", "grammalecte_dir", "latex_preamble", "ignored", "interface"}
 
 
 def config_dir() -> Path:
@@ -46,14 +49,19 @@ class Config:
     english_variant: str = "en-US"
     dictionary: Path = Path()
     disabled_rules: Path = Path()
+    ignored: Path = Path()
     grammalecte: bool = True
     grammalecte_dir: Path | None = None
+    latex_preamble: list[Path] = field(default_factory=list)
+    interface: str = "auto"
 
     def __post_init__(self):
         if self.dictionary == Path():
             self.dictionary = config_dir() / "dictionary.txt"
         if self.disabled_rules == Path():
             self.disabled_rules = config_dir() / "disabled-rules.txt"
+        if self.ignored == Path():
+            self.ignored = config_dir() / "ignored.txt"
         if self.grammalecte_dir is None:
             self.grammalecte_dir = data_dir() / "grammalecte"
 
@@ -106,7 +114,12 @@ def load(path: Path | None = None) -> Config:
         config.dictionary = _path(raw["dictionary"])
     if "disabled_rules" in raw:
         config.disabled_rules = _path(raw["disabled_rules"])
+    if "ignored" in raw:
+        config.ignored = _path(raw["ignored"])
     if "grammalecte_dir" in raw:
         config.grammalecte_dir = _path(raw["grammalecte_dir"])
     config.grammalecte = bool(raw.get("grammalecte", True))
+    config.interface = str(raw.get("interface", "auto"))
+    preamble = raw.get("latex_preamble", [])
+    config.latex_preamble = [_path(p) for p in ([preamble] if isinstance(preamble, str) else preamble)]
     return config

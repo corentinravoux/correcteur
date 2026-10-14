@@ -17,15 +17,17 @@ def _position(text: str, offset: int) -> tuple[int, int]:
 def check_file(path: str, language: str, picky: bool, tex: bool | None = None) -> int:
     from .config import load
     from .engine import LanguageTool
-    from .issues import load_rules
     from .latex import looks_like_latex
+    from .userdata import UserData
 
     text = sys.stdin.read() if path == "-" else Path(path).read_text(encoding="utf-8")
     if tex is None:
         tex = path.endswith(".tex") or looks_like_latex(text)
     config = load()
+    user = UserData(config)
     with LanguageTool(config) as engine:
-        result = engine.check(text, language, picky, set(load_rules(config.disabled_rules)), tex)
+        result = engine.check(text, language, picky, set(user.rules), tex)
+    result.issues = user.filter(result.issues, text)
     for issue in result.issues:
         line, col = _position(text, issue.offset)
         word = u16_slice(text, issue.offset, issue.end)
