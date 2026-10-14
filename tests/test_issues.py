@@ -5,7 +5,8 @@ from correcteur.issues import Issue
 LT_MATCHES = [
     {"message": "Vérifiez l’accord entre le pronom « Il » et le verbe « ont ».", "offset": 0, "length": 6,
      "replacements": [{"value": "Ils ont"}, {"value": "Il a"}],
-     "rule": {"id": "ACCORD_R_PERS_VERBE", "issueType": "uncategorized", "category": {"id": "GRAMMAR"}}},
+     "rule": {"id": "ACCORD_R_PERS_VERBE", "description": "je + token + verbe", "issueType": "uncategorized",
+              "category": {"id": "GRAMMAR"}}},
     {"message": "Faute de frappe possible trouvée.", "offset": 13, "length": 9,
      "replacements": [{"value": "des pommes"}],
      "rule": {"id": "FR_SPELLING_RULE", "issueType": "misspelling", "category": {"id": "TYPOS"}}},
@@ -17,6 +18,7 @@ def test_from_languagetool():
     assert [(i.offset, i.length, i.kind) for i in found] == [(0, 6, "grammar"), (13, 9, "spelling")]
     assert found[0].replacements == ["Ils ont", "Il a"]
     assert found[0].rule_id == "ACCORD_R_PERS_VERBE"
+    assert found[0].description == "je + token + verbe" and found[0].source == "LanguageTool"
 
 
 def test_kind_of():
@@ -77,3 +79,16 @@ def test_dictionary_file(tmp_path):
     iss.add_to_dictionary(path, "Lyα")
     path.write_text(path.read_text() + "# comment\n\n")
     assert iss.load_dictionary(path) == {"HEALPix", "Lyα"}
+
+
+def test_drop_disabled_rules():
+    found = [Issue(0, 2, "", rule_id="A"), Issue(3, 2, "", rule_id="B")]
+    assert iss.drop_known(found, "ab cd", set(), set(), {"A": "Rule A"}) == [found[1]]
+
+
+def test_rules_file(tmp_path):
+    path = tmp_path / "rules.txt"
+    assert iss.load_rules(path) == {}
+    iss.save_rules(path, {"WHITESPACE_RULE": "Whitespace repetition", "NO_DESC": ""})
+    assert path.read_text().splitlines()[1:] == ["NO_DESC", "WHITESPACE_RULE  # Whitespace repetition"]
+    assert iss.load_rules(path) == {"WHITESPACE_RULE": "Whitespace repetition", "NO_DESC": ""}

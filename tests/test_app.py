@@ -7,7 +7,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
 from PySide6.QtCore import QSettings
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QPushButton
 
 from correcteur.app import Window
 from correcteur.config import Config
@@ -33,13 +33,15 @@ class FakeEngine:
     def stop(self):
         self.stopped = True
 
-    def check(self, text, language="auto", picky=False):
+    def check(self, text, language="auto", picky=False, disabled=(), tex=False):
         self.calls.append((text, language, picky))
+        self.tex = tex
         found = []
         for word, rep, kind in (("Il ont", "Ils ont", "grammar"), ("des pomme", "des pommes", "grammar"),
                                 ("Healpix", "Healpy", "spelling")):
             if word in text:
-                found.append(Issue(text.index(word), len(word), f"fix {word}", [rep], f"R{len(found)}", kind))
+                found.append(Issue(text.index(word), len(word), f"fix {word}", [rep], f"R{len(found)}", kind,
+                                   description=f"Rule {len(found)}"))
         return CheckResult(found, "French")
 
 
@@ -51,7 +53,9 @@ def app():
 @pytest.fixture
 def window(app, tmp_path):
     QSettings.setPath(QSettings.Format.NativeFormat, QSettings.Scope.UserScope, str(tmp_path / "settings"))
-    w = Window(Config(engine_dir=None, dictionary=tmp_path / "dictionary.txt"), engine=FakeEngine())
+    config = Config(engine_dir=None, dictionary=tmp_path / "dictionary.txt",
+                    disabled_rules=tmp_path / "disabled-rules.txt")
+    w = Window(config, engine=FakeEngine())
     wait_for(app, lambda: w.engine_state == "ready")
     yield w
     w.close()
@@ -77,7 +81,7 @@ def test_check_shows_issues(app, window):
     found = checked(app, window)
     assert len(found) == 3
     assert len(window.editor.extraSelections()) == 3
-    assert window.status.text() == "3 issues (1 spelling, 2 grammar) · French"
+    assert window.status.text() == "3 issues in French"
     assert window.engine.calls[-1] == (TEXT, "auto", False)
 
 
@@ -129,3 +133,80 @@ def test_copy_and_paste(app, window):
     window.editor.setPlainText("Corrigé.")
     window.copy()
     assert clipboard.text() == "Corrigé."
+
+
+def test_margin_lists_notes_and_fixes(app, window):
+    from correcteur.margin import Note
+    from PySide6.QtWidgets import QPushButton
+
+    checked(app, window)
+    notes = window.margin.widget().findChildren(Note)
+    assert [n.issue.rule_id for n in notes] == ["R0", "R1", "R2"]
+    chip = next(b for b in notes[1].findChildren(QPushButton) if b.objectName() == "chip")
+    chip.click()
+    assert "des pommes" in window.editor.toPlainText()
+    wait_for(app, lambda: len(window.margin.widget().findChildren(Note)) == 2)
+
+
+def test_reveal_and_next_issue(app, window):
+    found = checked(app, window)
+    window.reveal(found[1])
+    assert window.editor.textCursor().selectedText() == "des pomme"
+    window.next_issue()
+    assert window.editor.textCursor().selectedText() == "Healpix"
+    window.next_issue()  # wraps around
+    assert window.editor.textCursor().selectedText() == "Il ont"
+    window.next_issue(backwards=True)
+    assert window.editor.textCursor().selectedText() == "Healpix"
+
+
+def test_theme_switch_repaints(app, window):
+    from correcteur import theme
+
+    checked(app, window)
+    window.apply_theme(theme.DARK)
+    colors = {s.format.underlineColor().name().upper() for s in window.editor.extraSelections()}
+    assert colors <= {c.upper() for c in theme.DARK.kinds.values()}
+    window.apply_theme(theme.LIGHT)
+
+
+def test_turn_off_and_on_a_rule(app, window, tmp_path):
+    from correcteur.app import RulesDialog
+    from correcteur.issues import load_rules
+
+    found = checked(app, window)
+    assert not window.rules_button.isVisibleTo(window)
+    window.turn_off(found[0])
+    assert load_rules(tmp_path / "disabled-rules.txt") == {"R0": "Rule 0"}
+    assert [i.rule_id for i in window.editor.issues] == ["R1", "R2"]
+    assert window.rules_button.text() == "1 rule off" and window.rules_button.isVisibleTo(window)
+    assert [i.rule_id for i in checked(app, window)] == ["R1", "R2"]  # stays off at the next check
+
+    dialog = RulesDialog(window)
+    turn_on = next(b for b in dialog.findChildren(QPushButton) if b.text() == "Turn on")
+    turn_on.click()
+    assert load_rules(tmp_path / "disabled-rules.txt") == {}
+    assert not window.rules_button.isVisibleTo(window)
+    assert len(checked(app, window)) == 3
+
+
+def test_paste_latex_ticks_the_box(app, window):
+    window.latex_box.setChecked(False)
+    QApplication.clipboard().setText(r"Voir \cite{a} et \ref{b}: Il ont faim.")
+    window.paste_and_check()
+    assert window.latex_box.isChecked()
+    wait_for(app, lambda: window.language)
+    assert window.engine.tex is True
+    QApplication.clipboard().setText("Plain text, Il ont faim.")
+    window.paste_and_check()  # never unticked automatically
+    assert window.latex_box.isChecked()
+
+
+def test_spelling_notes_offer_no_turn_off(app, window):
+    from correcteur.margin import Note
+
+    checked(app, window)
+    labels = {n.issue.kind: [b.text() for b in n.findChildren(QPushButton) if b.objectName() == "link"]
+              for n in window.margin.widget().findChildren(Note)}
+    assert labels["spelling"] == ["Ignore", "Add to dictionary"]
+    assert labels["grammar"] == ["Ignore", "Turn off rule"]

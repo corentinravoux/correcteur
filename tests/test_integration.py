@@ -48,3 +48,19 @@ def test_mixed_languages(engine):
     result = engine.check("Je doit partir.\n\nThis is a error.", "auto")
     assert result.language == "French + English (US)"
     assert {i.replacements[0] for i in result.issues} >= {"dois", "an"}
+
+
+def test_latex(engine):
+    text = r"Comme montré par \citet{smith}, les donnée $x$ sont \emph{bonnes} et je doit partir \ref{a}."
+    result = engine.check(text, "fr", tex=True)
+    flagged = {text[i.offset:i.end] for i in result.issues}
+    assert "doit" in flagged
+    assert not any(w in flagged for w in ("smith", "citet", "emph", "ref"))
+
+
+def test_grammalecte_fix_comes_first(engine):
+    if "Grammalecte" not in engine.engines:
+        pytest.skip("Grammalecte not installed")
+    result = engine.check("Je dois vérifier les donnée.", "fr")
+    issue = next(i for i in result.issues if "donnée" in "Je dois vérifier les donnée."[i.offset:i.end])
+    assert issue.replacements[0].endswith("données")

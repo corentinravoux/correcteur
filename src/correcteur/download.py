@@ -9,6 +9,8 @@ import zipfile
 from pathlib import Path
 
 from .config import data_dir, find_engine
+from .french import URL as GRAMMALECTE_URL
+from .french import available as grammalecte_available
 
 ENGINE_URL = "https://languagetool.org/download/LanguageTool-stable.zip"
 NGRAM_URLS = {
@@ -42,7 +44,25 @@ def _unpack(url: str, into: Path) -> None:
     archive.unlink()
 
 
-def download(dest: Path | None = None, ngrams: tuple[str, ...] | list[str] = ()) -> Path:
+def download_grammalecte(dest: Path) -> Path:
+    """Fetch Grammalecte and keep only its Python package, in ``dest/grammalecte``."""
+    target = dest / "grammalecte"
+    if grammalecte_available(target):
+        print(f"Grammalecte already present: {target}", file=sys.stderr)
+        return target
+    target.mkdir(parents=True, exist_ok=True)
+    archive = target / GRAMMALECTE_URL.rsplit("/", 1)[1]
+    print(f"Downloading {GRAMMALECTE_URL}", file=sys.stderr)
+    _fetch(GRAMMALECTE_URL, archive)
+    with zipfile.ZipFile(archive) as z:
+        z.extractall(target, [m for m in z.namelist() if m.startswith("grammalecte/")])
+        z.extract("LICENSE.txt", target)
+    archive.unlink()
+    return target
+
+
+def download(dest: Path | None = None, ngrams: tuple[str, ...] | list[str] = (),
+             grammalecte: bool = False) -> Path:
     dest = dest or data_dir()
     unknown = set(ngrams) - set(NGRAM_URLS)
     if unknown:
@@ -60,6 +80,8 @@ def download(dest: Path | None = None, ngrams: tuple[str, ...] | list[str] = ())
             print(f"n-grams for {lang} already present", file=sys.stderr)
             continue
         _unpack(NGRAM_URLS[lang], dest / "ngrams")
+    if grammalecte:
+        download_grammalecte(dest)
     if shutil.which("java") is None:
         print("Warning: Java was not found; install a Java runtime, version 17 or later.", file=sys.stderr)
     return engine

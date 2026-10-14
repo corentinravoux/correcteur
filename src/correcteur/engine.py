@@ -17,15 +17,19 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
+from . import french, latex
 from .config import SERVER_JAR, Config
-from .issues import Issue, from_languagetool, u16_len
+from .issues import Issue, from_languagetool, merge, u16_len, u16_slice
 
 
 class EngineError(RuntimeError):
     pass
+
+
+LANGUAGES = ("fr", "en")  # Auto picks between these
 
 
 @dataclass
@@ -33,16 +37,27 @@ class CheckResult:
     issues: list[Issue]
     language: str
     incomplete: bool = False
+    code: str = ""
+    parts: list[tuple[int, int, str]] = field(default_factory=list)  # (start, end, language code)
 
 
-def check_text(base_url: str, text: str, language: str = "auto", picky: bool = False,
-               english_variant: str = "en-US", timeout: float = 120) -> CheckResult:
-    """Send ``text`` to the LanguageTool server at ``base_url``."""
-    params = {"text": text, "language": language}
+def check_text(base_url: str, text: str | list[dict], language: str = "auto", picky: bool = False,
+               english_variant: str = "en-US", disabled=(), timeout: float = 120) -> CheckResult:
+    """Send ``text`` to the LanguageTool server at ``base_url``.
+
+    ``text`` is a string, or annotated text: a list of ``{"text": ...}`` and
+    ``{"markup": ..., "interpretAs": ...}`` segments (see :mod:`correcteur.latex`).
+    """
+    if isinstance(text, str):
+        params = {"text": text, "language": language}
+    else:
+        params = {"data": json.dumps({"annotation": text}), "language": language}
     if language == "auto":
         params["preferredVariants"] = english_variant
     if picky:
         params["level"] = "picky"
+    if disabled:
+        params["disabledRules"] = ",".join(sorted(disabled))
     data = urllib.parse.urlencode(params).encode()
     try:
         with urllib.request.urlopen(f"{base_url}/v2/check", data=data, timeout=timeout) as reply:
@@ -55,6 +70,7 @@ def check_text(base_url: str, text: str, language: str = "auto", picky: bool = F
         issues=from_languagetool(result.get("matches", [])),
         language=result.get("language", {}).get("name", ""),
         incomplete=bool(result.get("warnings", {}).get("incompleteResults")),
+        code=result.get("language", {}).get("code", ""),
     )
 
 
@@ -68,17 +84,56 @@ def paragraphs(text: str) -> list[tuple[int, str]]:
     return found
 
 
-def check_paragraphs(base_url: str, text: str, picky: bool = False,
-                     english_variant: str = "en-US") -> CheckResult:
-    """Check each paragraph with its own detected language, so French and English can be mixed."""
-    issues, languages, incomplete = [], [], False
-    for offset, part in paragraphs(text):
-        result = check_text(base_url, part, "auto", picky, english_variant)
+def check_chunks(base_url: str, chunks, language: str = "auto", picky: bool = False,
+                 english_variant: str = "en-US", disabled=()) -> CheckResult:
+    """Check (offset, text) pieces one by one; with "auto", each gets its own language.
+
+    Detection is unreliable on short pieces such as headings. A piece detected as
+    neither French nor English is checked again in the language most other pieces
+    have, or in English when there is none.
+    """
+    chunks = list(chunks)
+    results = [check_text(base_url, part, language, picky, english_variant, disabled) for _, part in chunks]
+    if language == "auto":
+        known = [r.code for r in results if r.code.split("-")[0] in LANGUAGES]
+        fallback = max(set(known), key=known.count) if known else english_variant
+        results = [r if r.code.split("-")[0] in LANGUAGES
+                   else check_text(base_url, part, fallback, picky, english_variant, disabled)
+                   for r, (_, part) in zip(results, chunks)]
+    issues, languages, incomplete, parts = [], [], False, []
+    for (offset, part), result in zip(chunks, results):
         issues += [replace(i, offset=i.offset + offset) for i in result.issues]
+        parts.append((offset, offset + u16_len(part if isinstance(part, str) else latex.source(part)), result.code))
         if result.language and result.language not in languages:
             languages.append(result.language)
         incomplete |= result.incomplete
-    return CheckResult(issues, " + ".join(languages), incomplete)
+    return CheckResult(issues, " + ".join(languages), incomplete, parts=parts)
+
+
+def check_paragraphs(base_url: str, text: str, picky: bool = False,
+                     english_variant: str = "en-US", disabled=()) -> CheckResult:
+    """Check each paragraph with its own detected language, so French and English can be mixed."""
+    return check_chunks(base_url, paragraphs(text), "auto", picky, english_variant, disabled)
+
+
+def check_latex(base_url: str, text: str, language: str = "auto", picky: bool = False,
+                english_variant: str = "en-US", disabled=(), segments: list[dict] | None = None) -> CheckResult:
+    """Check the prose of LaTeX source, paragraph by paragraph.
+
+    An issue that overlaps a command keeps its message but loses its suggestions:
+    applying one would delete part of the command. A spelling issue there is
+    dropped: it comes from reading markup and prose as one word.
+    """
+    segments = segments if segments is not None else latex.annotate(text)
+    result = check_chunks(base_url, latex.paragraphs(segments), language, picky, english_variant, disabled)
+    spans = latex.markup_spans(segments)
+    result.issues = [replace(i, replacements=[]) if overlaps(i, spans) else i for i in result.issues
+                     if not (i.kind == "spelling" and overlaps(i, spans))]
+    return result
+
+
+def overlaps(issue: Issue, spans: list[tuple[int, int]]) -> bool:
+    return any(a < issue.end and issue.offset < b for a, b in spans)
 
 
 def _free_port() -> int:
@@ -94,6 +149,9 @@ class LanguageTool:
         self.config = config
         self.process: subprocess.Popen | None = None
         self.port: int | None = None
+        self.french: french.Grammalecte | None = None
+        self.french_error = ""
+        self._french_tried = False
         self._workdir: Path | None = None
 
     @property
@@ -148,17 +206,53 @@ class LanguageTool:
                 time.sleep(0.25)
         raise EngineError(f"LanguageTool did not start within {timeout:.0f} s:\n{self.log_tail()}")
 
+    @property
+    def engines(self) -> list[str]:
+        return ["LanguageTool"] + (["Grammalecte"] if self.french else [])
+
+    def load_french(self) -> None:
+        """Load Grammalecte if it is installed and wanted; a failure only disables it."""
+        if self._french_tried:
+            return
+        self._french_tried = True
+        if not (self.config.grammalecte and french.available(self.config.grammalecte_dir)):
+            return
+        try:
+            self.french = french.Grammalecte(self.config.grammalecte_dir)
+        except Exception as e:  # a broken or incompatible copy must not stop the app
+            self.french_error = f"Grammalecte could not be loaded: {e}"
+
     def warm_up(self) -> None:
         """Load the French and English rules now, so the first real check is quick."""
         self.check("Ceci est un essai.", "fr")
         self.check("This is a test.", self.config.english_variant)
 
-    def check(self, text: str, language: str = "auto", picky: bool = False) -> CheckResult:
+    def check(self, text: str, language: str = "auto", picky: bool = False, disabled=(),
+              tex: bool = False) -> CheckResult:
         if self.process is None or self.process.poll() is not None:
             raise EngineError(f"LanguageTool is not running.\n{self.log_tail()}".rstrip())
-        if language == "auto":
-            return check_paragraphs(self.url, text, picky, self.config.english_variant)
-        return check_text(self.url, text, language, picky, self.config.english_variant)
+        self.load_french()
+        variant = self.config.english_variant
+        if tex:
+            segments = latex.annotate(text)
+            result = check_latex(self.url, text, language, picky, variant, disabled, segments)
+            base, spans = latex.mask(segments), latex.markup_spans(segments)
+        else:
+            chunks = paragraphs(text) if language == "auto" else [(0, text)]
+            result = check_chunks(self.url, chunks, language, picky, variant, disabled)
+            base, spans = text, []
+        if self.french:
+            result.issues = merge(result.issues, self._second_opinion(result, base, spans, picky, disabled), text)
+        return result
+
+    def _second_opinion(self, result: CheckResult, base: str, spans, picky: bool, disabled) -> list[Issue]:
+        """Grammalecte's issues in the French parts; ``base`` has any markup blanked out."""
+        found = []
+        for start, end, code in result.parts:
+            if code.startswith("fr"):
+                found += [replace(i, offset=i.offset + start)
+                          for i in self.french.check(u16_slice(base, start, end), picky, disabled)]
+        return [i for i in found if not overlaps(i, spans)]
 
     def stop(self) -> None:
         if self.process is not None and self.process.poll() is None:

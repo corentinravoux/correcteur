@@ -25,6 +25,8 @@ class Issue:
     replacements: list[str] = field(default_factory=list, compare=False)
     rule_id: str = ""
     kind: str = "grammar"
+    description: str = field(default="", compare=False)  # the rule's name, e.g. "Possible typo"
+    source: str = field(default="LanguageTool", compare=False)
 
     @property
     def end(self) -> int:
@@ -52,6 +54,7 @@ def from_languagetool(matches: list[dict]) -> list[Issue]:
             replacements=[r["value"] for r in m.get("replacements", [])],
             rule_id=rule.get("id", ""),
             kind=kind_of(rule.get("issueType", ""), rule.get("category", {}).get("id", "")),
+            description=rule.get("description", ""),
         ))
     return issues
 
@@ -101,10 +104,12 @@ def apply_all(text: str, issues: list[Issue]) -> str:
 
 
 def drop_known(issues: list[Issue], text: str, dictionary: set[str],
-               ignored: set[tuple[str, str]]) -> list[Issue]:
-    """Remove spelling issues on dictionary words, and issues the user ignored."""
+               ignored: set[tuple[str, str]], disabled: set[str] | dict[str, str] = frozenset()) -> list[Issue]:
+    """Remove spelling issues on dictionary words, issues the user ignored, and turned-off rules."""
     kept = []
     for issue in issues:
+        if issue.rule_id in disabled:
+            continue
         word = u16_slice(text, issue.offset, issue.end)
         if issue.kind == "spelling" and in_dictionary(word, dictionary):
             continue
@@ -130,3 +135,46 @@ def add_to_dictionary(path: Path, word: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with open(path, "a", encoding="utf-8") as f:
         f.write(word + "\n")
+
+
+def load_rules(path: Path) -> dict[str, str]:
+    """Turned-off rules, one per line: ``RULE_ID  # description``."""
+    if not path.is_file():
+        return {}
+    rules = {}
+    for line in path.read_text(encoding="utf-8").splitlines():
+        rule, _, description = line.partition("#")
+        if rule.strip():
+            rules[rule.strip()] = description.strip()
+    return rules
+
+
+def save_rules(path: Path, rules: dict[str, str]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    lines = ["# Rules Correcteur never flags. Delete a line to turn its rule back on."]
+    lines += [f"{rule}  # {description}" if description else rule for rule, description in sorted(rules.items())]
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def merge(primary: list[Issue], second: list[Issue], text: str) -> list[Issue]:
+    """Add a second engine's issues to the first's.
+
+    An issue inside one of the first engine's spans becomes a suggestion for it,
+    put first: two engines agreeing on a fix is the best signal there is. An
+    issue elsewhere is kept as it is. One that partly overlaps is dropped.
+    """
+    merged = list(primary)
+    for extra in second:
+        hits = [k for k, p in enumerate(merged) if p.offset < extra.end and extra.offset < p.end]
+        if not hits:
+            merged.append(extra)
+            continue
+        k = hits[0]
+        host = merged[k]
+        if len(hits) > 1 or not (host.offset <= extra.offset and extra.end <= host.end) or not extra.replacements:
+            continue
+        before = u16_slice(text, host.offset, extra.offset)
+        after = u16_slice(text, extra.end, host.end)
+        fix = before + extra.replacements[0] + after
+        merged[k] = replace(host, replacements=[fix] + [r for r in host.replacements if r != fix])
+    return sorted(merged, key=lambda i: (i.offset, i.end))

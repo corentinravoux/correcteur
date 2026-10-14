@@ -1,24 +1,37 @@
 [build-system]
-requires = ["setuptools>=68"]
+requires = ["setuptools>=77"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "correcteur"
-version = "0.1.0"
+dynamic = ["version"]
 description = "A small desktop grammar checker for French and English, powered by a local LanguageTool server"
 readme = "README.md"
-license = { text = "MIT" }
+license = "MIT"
+license-files = ["LICENSE"]
 authors = [{ name = "Corentin Ravoux" }]
 requires-python = ">=3.11"
 dependencies = ["PySide6>=6.5"]
-keywords = ["grammar", "spelling", "languagetool", "french", "english"]
+keywords = ["grammar", "spelling", "proofreading", "languagetool", "grammalecte", "latex", "french", "english"]
 classifiers = [
-    "Programming Language :: Python :: 3",
-    "License :: OSI Approved :: MIT License",
-    "Operating System :: POSIX :: Linux",
-    "Topic :: Text Processing :: Linguistic",
+    "Development Status :: 4 - Beta",
     "Environment :: X11 Applications :: Qt",
+    "Intended Audience :: End Users/Desktop",
+    "Intended Audience :: Science/Research",
+    "Natural Language :: English",
+    "Natural Language :: French",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Text Processing :: Linguistic",
 ]
+
+[project.urls]
+Homepage = "https://github.com/corentinravoux/correcteur"
+Issues = "https://github.com/corentinravoux/correcteur/issues"
+Changelog = "https://github.com/corentinravoux/correcteur/blob/main/CHANGELOG.md"
 
 [project.optional-dependencies]
 dev = ["pytest"]
@@ -26,9 +39,15 @@ dev = ["pytest"]
 [project.scripts]
 correcteur = "correcteur.cli:main"
 
+[tool.setuptools.dynamic]
+version = { attr = "correcteur.__version__" }
+
 [tool.setuptools.packages.find]
 where = ["src"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 markers = ["integration: starts the real LanguageTool server (skipped when it is not installed)"]
+
+[tool.setuptools.package-data]
+correcteur = ["resources/*.svg"]

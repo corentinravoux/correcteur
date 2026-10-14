@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 from correcteur.config import Config
-from correcteur.engine import EngineError, LanguageTool, check_paragraphs, check_text, paragraphs
+from correcteur.engine import EngineError, LanguageTool, check_latex, check_paragraphs, check_text, paragraphs
 from correcteur.issues import u16_len, u16_slice
 
 from test_issues import LT_MATCHES
@@ -19,13 +19,19 @@ class FakeLanguageTool(BaseHTTPRequestHandler):
     def do_POST(self):
         body = self.rfile.read(int(self.headers["Content-Length"])).decode()
         params = {k: v[0] for k, v in urllib.parse.parse_qs(body).items()}
+        if "data" in params:
+            segments = json.loads(params.pop("data"))["annotation"]
+            params["text"] = "".join(s.get("text", s.get("markup")) for s in segments)
+            params["annotated"] = "yes"
         FakeLanguageTool.requests.append(params)
         if params["language"] == "xx":
             self.send_response(400)
             self.end_headers()
             self.wfile.write(b"Error: 'xx' is not a language code")
             return
-        reply = {"language": {"name": "French", "code": "fr"}, "matches": LT_MATCHES,
+        name, code = ("Catalan", "ca") if "Catalan" in params["text"] and params["language"] == "auto" \
+            else ("French", "fr")
+        reply = {"language": {"name": name, "code": code}, "matches": LT_MATCHES,
                  "warnings": {"incompleteResults": params["text"] == "long"}}
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
@@ -57,6 +63,11 @@ def test_check_text(server):
 def test_check_text_fixed_language_sends_no_variant(server):
     check_text(server, "Bonjour", "fr")
     assert FakeLanguageTool.requests[-1] == {"text": "Bonjour", "language": "fr"}
+
+
+def test_check_text_sends_disabled_rules(server):
+    check_text(server, "Bonjour", "fr", disabled={"B_RULE", "A_RULE"})
+    assert FakeLanguageTool.requests[-1]["disabledRules"] == "A_RULE,B_RULE"
 
 
 def test_check_text_reports_incomplete_and_errors(server):
@@ -101,4 +112,20 @@ def test_check_paragraphs_merges_results(server):
     result = check_paragraphs(server, text)
     assert [r["text"] for r in FakeLanguageTool.requests] == ["Il ont mangé des pomme."] * 2
     assert [i.offset for i in result.issues] == [0, 13, 25, 38]
+    assert result.language == "French"
+
+
+def test_check_latex_sends_annotation_and_protects_markup(server):
+    # The fake server always reports "Il ont" at 0..6 and a typo at 13..22.
+    text = "Il ont mangé \\emph{des} pomme."
+    result = check_latex(server, text, "fr")
+    sent = FakeLanguageTool.requests[-1]
+    assert sent["annotated"] == "yes" and sent["text"] == text
+    assert [i.replacements for i in result.issues] == [["Ils ont", "Il a"]]  # the typo over \emph{ is dropped
+
+
+def test_auto_rechecks_other_languages(server):
+    text = "Il ont mangé des pomme.\n\nCatalan heading\n\nIl ont mangé des pomme."
+    result = check_paragraphs(server, text)
+    assert [r["language"] for r in FakeLanguageTool.requests] == ["auto", "auto", "auto", "fr"]
     assert result.language == "French"
