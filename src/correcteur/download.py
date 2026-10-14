@@ -8,6 +8,7 @@ import urllib.request
 import zipfile
 from pathlib import Path
 
+from . import __version__
 from .config import data_dir, find_engine
 from .french import URL as GRAMMALECTE_URL
 from .french import available as grammalecte_available
@@ -19,9 +20,14 @@ NGRAM_URLS = {
 }
 
 
+# languagetool.org answers 403 to Python's default User-Agent.
+USER_AGENT = f"correcteur/{__version__} (+https://github.com/corentinravoux/correcteur)"
+
+
 def _fetch(url: str, dest: Path) -> None:
     partial = dest.with_suffix(dest.suffix + ".part")
-    with urllib.request.urlopen(url) as reply, open(partial, "wb") as out:
+    request = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
+    with urllib.request.urlopen(request) as reply, open(partial, "wb") as out:
         total = int(reply.headers.get("Content-Length", 0))
         done = 0
         while chunk := reply.read(1 << 20):
