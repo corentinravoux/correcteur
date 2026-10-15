@@ -59,3 +59,37 @@ def test_filter(tmp_path):
     assert user.filter(found, text) == [found[1]]
     grammar = Issue(0, 7, "", kind="grammar", language="fr")  # dictionaries only silence spelling
     assert user.filter([grammar], text) == [grammar]
+
+
+def test_ignored_text_with_tabs_and_newlines(tmp_path):
+    user = make(tmp_path)
+    user.ignore("DUPLICATE", "the\nthe", "Repeated word")
+    user.ignore("TAB", "a\tb")
+    assert make(tmp_path).ignored == {("DUPLICATE", "the\nthe"): "Repeated word", ("TAB", "a\tb"): ""}
+    user.unignore("DUPLICATE", "the\nthe")
+    assert list(make(tmp_path).ignored) == [("TAB", "a\tb")]
+
+
+def test_dictionary_refuses_words_it_cannot_store(tmp_path):
+    user = make(tmp_path)
+    assert not user.add_word("two\nlines") and not user.add_word("#tag") and not user.add_word(" ")
+    assert user.add_word("HEALPix")
+    assert make(tmp_path).words[""] == {"HEALPix"}
+
+
+def test_saving_keeps_hand_edits_and_comments(tmp_path):
+    path = tmp_path / "dictionary-fr.txt"
+    path.write_text("# my cosmology words\nredshift\n", encoding="utf-8")
+    user = make(tmp_path)
+    with open(path, "a", encoding="utf-8") as f:   # edited by hand while the app runs
+        f.write("lensing\n")
+    user.add_word("fσ8", "fr")
+    user.remove_word("redshift", "fr")
+    assert path.read_text(encoding="utf-8").splitlines() == ["# my cosmology words", "lensing", "fσ8"]
+    rules = tmp_path / "rules.txt"
+    rules.write_text("# turned off on purpose\nA_RULE  # first\n", encoding="utf-8")
+    user = make(tmp_path)
+    user.disable_rule("B_RULE", "second")
+    user.enable_rule("A_RULE")
+    assert rules.read_text(encoding="utf-8").splitlines() == ["# turned off on purpose", "B_RULE  # second"]
+    assert not list(tmp_path.glob("*.tmp"))

@@ -100,3 +100,18 @@ def test_macros_in_text():
 
 def read_with(src, macros):
     return latex.interpreted(latex.annotate(src, macros))
+
+
+def test_mask_keeps_utf16_positions():
+    # 𝑥 and 𝛼 are two UTF-16 units each; the masked copy must keep every position.
+    src = "% 𝑥 commentaire\nLes donnée $𝛼$ sont ici."
+    from correcteur.issues import u16_len
+    assert u16_len(latex.mask(latex.annotate(src))) == u16_len(src)
+
+
+def test_annotate_is_linear_in_length():
+    import time
+    big = "Le modèle $x$ et \\ldots puis \\oe uvre. " * 10000   # about 400 000 characters
+    start = time.monotonic()
+    latex.annotate(big)
+    assert time.monotonic() - start < 0.5

@@ -73,6 +73,9 @@ FR = {
     "{n} issue in {language}": "{n} point à revoir en {language}",
     "{n} issues in {language}": "{n} points à revoir en {language}",
     "No issues in {language}": "Aucun point à revoir en {language}",
+    " (text edited since the check)": " (texte modifié depuis la vérification)",
+    "Not added: a dictionary entry is one word, without spaces, not starting with #.":
+        "Non ajouté\u00a0: une entrée du dictionnaire est un seul mot, sans espace, qui ne commence pas par #.",
     "Configuration error": "Erreur de configuration",
     # Menu and margin
     "No suggestion": "Aucune suggestion",

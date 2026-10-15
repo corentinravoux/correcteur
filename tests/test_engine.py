@@ -148,3 +148,17 @@ def test_macros_follow_the_preamble_file(tmp_path):
     import os
     os.utime(preamble, (1, 1))  # a different modification time
     assert lt.macros() == {"desi": "DESI", "ztf": "ZTF"}
+
+
+def test_failed_launch_cleans_up(tmp_path, monkeypatch):
+    import subprocess
+    (tmp_path / "languagetool-server.jar").write_text("")
+    lt = LanguageTool(Config(engine_dir=tmp_path, java="python3"))
+
+    def broken(*args, **kwargs):
+        raise PermissionError("not executable")
+
+    monkeypatch.setattr(subprocess, "Popen", broken)
+    with pytest.raises(EngineError, match="could not be started"):
+        lt.start()
+    assert lt._workdir is None and lt.process is None

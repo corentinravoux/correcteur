@@ -62,6 +62,7 @@ _LOOKS = re.compile(r"\\(?:begin|end|section|subsection|cite\w*|ref|eqref|label|
                     r"footnote|item|frac|usepackage|documentclass)\b|\$[^$\n]+\$")
 _BLANK_LINE = re.compile(r"\n[ \t]*\n")
 _SPACED_LETTER = re.compile(r"[ \t]+(?=[A-Za-z])")
+_SPACES_AFTER = re.compile(r"[ \t]*")
 _NEWCOMMAND = re.compile(r"\\(?:(?:re)?newcommand|providecommand|DeclareRobustCommand)\*?\s*"
                          r"(?:\{\s*\\([A-Za-z]+)\s*\}|\\([A-Za-z]+))\s*(?:\[(\d)\])?\s*(?:\[[^\]]*\])?\s*(?=\{)")
 _DEF = re.compile(r"\\[gex]?def\s*\\([A-Za-z]+)([^{]*)(?=\{)")
@@ -128,8 +129,10 @@ def _groups_end(src: str, i: int, brackets_only: bool = False, limit: int | None
 def _unescaped(src: str, needle: str, start: int) -> int:
     j = start
     while (j := src.find(needle, j)) >= 0:
-        backslashes = len(src[:j]) - len(src[:j].rstrip("\\"))
-        if backslashes % 2 == 0:
+        k = j
+        while k > 0 and src[k - 1] == "\\":  # count the backslashes before, without copying the text
+            k -= 1
+        if (j - k) % 2 == 0:
             return j
         j += 1
     return -1
@@ -282,7 +285,7 @@ def _command(src: str, i: int, out: _Segments, macros: dict[str, str]) -> int:
         return k
     if name in SYMBOLS:
         # TeX swallows the spaces after a control word: "\oe uvre" reads "œuvre".
-        k = j + 2 if src.startswith("{}", j) else j + len(src[j:]) - len(src[j:].lstrip(" \t"))
+        k = j + 2 if src.startswith("{}", j) else _SPACES_AFTER.match(src, j).end()
         out.markup(src[i:k], SYMBOLS[name])
         return k
     if base in FIRST_ARG_MARKUP:
@@ -333,8 +336,13 @@ def markup_spans(segments: list[dict]) -> list[tuple[int, int]]:
 
 
 def mask(segments: list[dict]) -> str:
-    """The source with markup blanked out, keeping every position and line break."""
-    return "".join(s["text"] if "text" in s else re.sub(r"[^\n]", " ", s["markup"]) for s in segments)
+    """The source with markup blanked out, keeping every position and line break.
+
+    Positions are UTF-16 units, so a character outside the BMP (𝑥) becomes two spaces.
+    """
+    return "".join(s["text"] if "text" in s else
+                   "".join("\n" if c == "\n" else "  " if ord(c) > 0xFFFF else " " for c in s["markup"])
+                   for s in segments)
 
 
 def paragraphs(segments: list[dict]) -> list[tuple[int, list[dict]]]:

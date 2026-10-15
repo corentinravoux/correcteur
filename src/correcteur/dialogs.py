@@ -6,10 +6,12 @@ from typing import TYPE_CHECKING
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (QAbstractItemView, QComboBox, QDialog, QDialogButtonBox, QHBoxLayout, QLabel,
-                               QLineEdit, QPushButton, QTabWidget, QTreeWidget, QTreeWidgetItem, QVBoxLayout,
-                               QWidget)
+                               QLineEdit, QPushButton, QTabWidget, QToolTip, QTreeWidget, QTreeWidgetItem,
+                               QVBoxLayout, QWidget)
 
 from .i18n import _
+
+NOT_A_WORD = "Not added: a dictionary entry is one word, without spaces, not starting with #."
 from .userdata import LANGUAGE_NAMES
 
 if TYPE_CHECKING:
@@ -136,7 +138,12 @@ class ExceptionsDialog(QDialog):
 
     def _add_word(self) -> None:
         word = self.new_word.text().strip()
-        if word:
-            self.user.add_word(word, self.new_lang.currentData())
+        if not word:
+            return
+        if self.user.add_word(word, self.new_lang.currentData()):
             self.new_word.clear()
             self.refresh()
+        else:
+            QToolTip.showText(self.new_word.mapToGlobal(self.new_word.rect().bottomLeft()),
+                              _(NOT_A_WORD), self.new_word)
+            self.new_word.selectAll()

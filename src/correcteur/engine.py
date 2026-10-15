@@ -195,9 +195,14 @@ class LanguageTool:
         self._workdir = Path(tempfile.mkdtemp(prefix="correcteur-"))
         self.port = _free_port()
         log = open(self._workdir / "server.log", "wb")
-        self.process = subprocess.Popen(self.command(), cwd=engine, stdout=log,
-                                        stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL)
-        log.close()
+        try:
+            self.process = subprocess.Popen(self.command(), cwd=engine, stdout=log,
+                                            stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL)
+        except OSError as e:
+            self.stop()
+            raise EngineError(f"LanguageTool could not be started: {e}") from e
+        finally:
+            log.close()
 
     def log_tail(self, lines: int = 15) -> str:
         if not self._workdir or not (self._workdir / "server.log").is_file():
@@ -206,11 +211,12 @@ class LanguageTool:
         return "\n".join(text.splitlines()[-lines:])
 
     def wait_ready(self, timeout: float = 90) -> None:
-        if self.process is None:
+        process = self.process  # read once: stop() may clear it from the main thread
+        if process is None:
             raise EngineError("LanguageTool is not running.")
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
-            if self.process.poll() is not None:
+            if process.poll() is not None:
                 raise EngineError(f"LanguageTool stopped while starting:\n{self.log_tail()}")
             try:
                 with urllib.request.urlopen(f"{self.url}/v2/languages", timeout=2):
@@ -265,7 +271,8 @@ class LanguageTool:
 
     def check(self, text: str, language: str = "auto", picky: bool = False, disabled=(),
               tex: bool = False) -> CheckResult:
-        if self.process is None or self.process.poll() is not None:
+        process = self.process  # read once: stop() may clear it from the main thread
+        if process is None or process.poll() is not None:
             raise EngineError(f"LanguageTool is not running.\n{self.log_tail()}".rstrip())
         self.load_french()
         variant = self.config.english_variant
@@ -305,7 +312,11 @@ class LanguageTool:
 
     def __enter__(self) -> LanguageTool:
         self.start()
-        self.wait_ready()
+        try:
+            self.wait_ready()
+        except BaseException:
+            self.stop()
+            raise
         return self
 
     def __exit__(self, *exc) -> None:

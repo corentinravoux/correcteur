@@ -25,6 +25,7 @@ from .userdata import LANGUAGE_NAMES, UserData, language_of
 
 LANGUAGES = [("Auto", "auto"), ("Français", "fr"), ("English (US)", "en-US"), ("English (UK)", "en-GB")]
 MAX_SUGGESTIONS = 7
+NOT_A_WORD = "Not added: a dictionary entry is one word, without spaces, not starting with #."
 SHEET_WIDTH = 860
 
 
@@ -55,7 +56,7 @@ class Editor(QPlainTextEdit):
         if self.issues:
             self.issues = iss.shift(self.issues, pos, removed, added)
             self.paint()
-            self.window_.issues_changed()
+        self.window_.text_edited()
 
     def paint(self) -> None:
         kinds, tint = self.window_.theme.kinds, self.window_.theme.tint
@@ -139,6 +140,11 @@ class Window(QMainWindow):
         self.engine_state = "starting"  # starting, ready, failed
         self.language = ""
         self.note = ""
+        self.checked_text, self.checked_issues = "", []  # the last check, to come back to after an undo
+        self.stale = False      # edited by hand since the last check
+        self.checking = False   # a check is queued or running
+        self._closing = False
+        self._own_edit = False  # an edit made by applying a suggestion
         self.user = UserData(config)
         self.settings = QSettings("correcteur", "correcteur")
         self.theme = th.current()
@@ -291,6 +297,8 @@ class Window(QMainWindow):
         self.update_status(keep_note=self.note == _("Starting LanguageTool, then checking…"))
 
     def _engine_failed(self, message: str) -> None:
+        if self._closing:
+            return
         self.engine_state = "failed"
         self.update_status()
         QMessageBox.critical(self, _("LanguageTool did not start"), message)
@@ -302,8 +310,11 @@ class Window(QMainWindow):
             self.note = _("LanguageTool is not running. Close Correcteur and open it again.")
         elif not text.strip():
             self.note = _("Nothing to check yet: paste or type some text.")
+        elif self.checking:  # one at a time; a text changed meanwhile is caught when the result arrives
+            return
         else:
             self.note = _("Checking…") if self.engine_state == "ready" else _("Starting LanguageTool, then checking…")
+            self.checking = True
             self.check_button.setEnabled(False)
             self.pool.submit(self._run_check, text, self.lang_box.currentData(), self.picky_box.isChecked(),
                              set(self.user.rules), self.latex_box.isChecked())
@@ -318,11 +329,13 @@ class Window(QMainWindow):
             self._emit(self.bridge.checked, text, result)
 
     def _checked(self, text: str, result: CheckResult) -> None:
+        self.checking = False
         self.check_button.setEnabled(True)
         if self.editor.toPlainText() != text:
             self.note = _("The text changed during the check. Press Check again.")
             self.update_status(keep_note=True)
             return
+        self.checked_text, self.checked_issues, self.stale = text, result.issues, False
         self.editor.set_issues(self.user.filter(result.issues, text))
         self.language = result.language
         self.note = _("Some results are missing: the text may be too long.") if result.incomplete else ""
@@ -330,7 +343,10 @@ class Window(QMainWindow):
         self.refresh_margin()
 
     def _check_failed(self, message: str) -> None:
+        self.checking = False
         self.check_button.setEnabled(True)
+        if self._closing:  # the engine was stopped under a running check
+            return
         self.note = _("The check failed.")
         self.update_status(keep_note=True)
         QMessageBox.warning(self, _("The check failed"), message)
@@ -386,7 +402,13 @@ class Window(QMainWindow):
         return menu.exec(where)
 
     def apply(self, issue: iss.Issue, replacement: str) -> None:
-        self.editor.span(issue).insertText(replacement)
+        if issue.end > self.editor.document().characterCount() - 1:  # outdated: beyond the text
+            return
+        self._own_edit = True
+        try:
+            self.editor.span(issue).insertText(replacement)
+        finally:
+            self._own_edit = False
 
     def reveal(self, issue: iss.Issue) -> None:
         """Select the issue's text in the sheet and scroll to it."""
@@ -431,6 +453,7 @@ class Window(QMainWindow):
             self.update_status(keep_note=True)
             return
         cursor = QTextCursor(self.editor.document())
+        self._own_edit = True
         cursor.beginEditBlock()
         for issue in chosen:  # last first, so earlier offsets stay valid
             span = self.editor.span(issue)
@@ -438,6 +461,7 @@ class Window(QMainWindow):
             cursor.setPosition(span.position(), QTextCursor.MoveMode.KeepAnchor)
             cursor.insertText(issue.replacements[0])
         cursor.endEditBlock()
+        self._own_edit = False
         self.note = ngettext("Applied {n} suggestion. Ctrl+Z undoes it.",
                              "Applied {n} suggestions. Ctrl+Z undoes them.", len(chosen))
         self.update_status(keep_note=True)
@@ -449,7 +473,10 @@ class Window(QMainWindow):
 
     def add_word(self, word: str, lang: str = "") -> None:
         """Add ``word`` to the dictionary of ``lang``, or of all languages."""
-        self.user.add_word(word, lang)
+        if not self.user.add_word(word, lang):
+            self.note = _(NOT_A_WORD)
+            self.update_status(keep_note=True)
+            return
         self.refilter()
 
     def turn_off(self, issue: iss.Issue) -> None:
@@ -465,6 +492,17 @@ class Window(QMainWindow):
 
     def exceptions_changed(self) -> None:
         self.refilter()
+
+    def text_edited(self) -> None:
+        """Follow any edit: back at the checked text (an undo), the checked issues return."""
+        if self.language and self.editor.toPlainText() == self.checked_text:
+            self.stale = False
+            restored = self.user.filter(self.checked_issues, self.checked_text)
+            if restored != self.editor.issues:
+                self.editor.set_issues(restored)
+        elif self.language and not self._own_edit:
+            self.stale = True
+        self.issues_changed()
 
     def issues_changed(self) -> None:
         self.update_status()
@@ -486,7 +524,9 @@ class Window(QMainWindow):
             self.update_status(keep_note=True)
             return
         self.editor.set_issues([])
+        self.language = ""  # the old result no longer applies
         self.editor.setPlainText(text)
+        self.refresh_margin()
         detected = not self.latex_box.isChecked() and looks_like_latex(text)
         if detected:
             self.latex_box.setChecked(True)
@@ -518,12 +558,15 @@ class Window(QMainWindow):
             language = _(" and ").join(language_name(x) for x in self.language.split(" + "))
             text = (_("No issues in {language}", language=language) if n == 0 else
                     ngettext("{n} issue in {language}", "{n} issues in {language}", n, language=language))
+            if self.stale:
+                text += _(" (text edited since the check)")
         self.status.setText(text)
         n = len(self.user.rules) + len(self.user.ignored)
         self.exceptions_button.setText(_("Exceptions ({n})", n=n) if n else _("Exceptions"))
         self.accept_button.setEnabled(any(i.replacements for i in self.editor.issues))
 
     def closeEvent(self, e) -> None:
+        self._closing = True
         self.settings.setValue("geometry", self.saveGeometry())
         self.settings.setValue("language", self.lang_box.currentIndex())
         self.settings.setValue("picky", "true" if self.picky_box.isChecked() else "false")

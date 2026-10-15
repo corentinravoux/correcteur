@@ -263,8 +263,6 @@ def test_current_note_follows_the_cursor(app, window):
 
 
 def test_french_interface(app, tmp_path):
-    from dataclasses import replace
-
     from correcteur import i18n
 
     config = Config(engine_dir=None, dictionary=tmp_path / "d.txt", disabled_rules=tmp_path / "r.txt",
@@ -272,7 +270,7 @@ def test_french_interface(app, tmp_path):
     w = Window(config, engine=FakeEngine())
     try:
         assert w.check_button.text() == "Vérifier" and w.lang_box.itemText(2) == "Anglais (US)"
-        found = checked(app, w)
+        checked(app, w)
         assert w.status.text() == "3 points à revoir en français"
         w.language = "French + English (US)"
         w.update_status()
@@ -281,3 +279,83 @@ def test_french_interface(app, tmp_path):
     finally:
         w.close()
         i18n.setup("en")
+
+
+def test_margin_never_wider_than_its_panel(app, window):
+    """Long suggestions, words and messages wrap or shorten instead of cutting the margin."""
+    from correcteur.margin import Note
+
+    text = ("Le modèle Chevallier-Polarski-Linder, mais je doit verifier les donnée. "
+            "Voir https://example.org/a/very/long/path/that/never/breaks/anywhere/at/all ici.")
+    long_message = ("Vérifiez l’accord entre le pronom « Il » et le verbe « ont ». Le verbe devrait être "
+                    "à la 3ᵉ personne du singulier ou le pronom au pluriel.")
+    issues = [
+        Issue(text.index("Chevallier"), 26, "Faute de frappe possible trouvée.",
+              ["Chevalier-Polarski-Linder", "Chevallier-Polarski-Lindner", "Chevaliers-Polarski"],
+              "SPELL", "spelling", language="fr"),
+        Issue(text.index("doit"), 4, long_message, ["dois"], "ACCORD", "grammar", language="fr"),
+        Issue(text.index("https"), 66, "Lien très long : " + "x" * 80, ["https://example.org/" + "y" * 60],
+              "URL", "typography", language="fr"),
+    ]
+    window.resize(1180, 700)
+    window.show()
+    window.editor.setPlainText(text)
+    window._checked(text, CheckResult(issues, "French"))
+    app.processEvents()
+    page, viewport = window.margin.widget(), window.margin.viewport()
+    assert page.width() <= viewport.width()
+    for note in page.findChildren(Note):
+        assert note.geometry().right() < viewport.width()
+        for child in note.findChildren(QPushButton) + note.findChildren(QLabel):
+            if child.isVisible():
+                right = child.mapTo(page, child.rect().topRight()).x()
+                assert right < viewport.width(), child.text()
+                if isinstance(child, QLabel) and child.wordWrap():
+                    assert child.height() >= child.heightForWidth(child.width()), child.text()
+
+
+def test_undo_back_to_the_checked_text_restores_the_issues(app, window):
+    checked(app, window)
+    window.accept_all()
+    assert window.editor.issues == []
+    window.editor.undo()
+    assert window.editor.toPlainText() == TEXT
+    assert [i.rule_id for i in window.editor.issues] == ["R0", "R1", "R2"]
+    assert window.status.text() == "3 issues in French"
+
+
+def test_status_says_when_the_text_changed_since_the_check(app, window):
+    found = checked(app, window)
+    window.apply(found[0], "Ils ont")  # applying a suggestion is not a hand edit
+    assert window.status.text() == "2 issues in French"
+    window.editor.moveCursor(window.editor.textCursor().MoveOperation.End)
+    window.editor.insertPlainText(" Fin.")
+    assert window.status.text() == "2 issues in French (text edited since the check)"
+
+
+def test_paste_clears_the_old_result_at_once(app, window):
+    found = checked(app, window)
+    QApplication.clipboard().setText("Court.")
+    window.engine.check = lambda *a, **k: (_ for _ in ()).throw(RuntimeError("engine down"))
+    window._check_failed = lambda message: None   # no dialog in the test
+    window.paste_and_check()
+    assert window.margin.widget().findChildren(QLabel)[0].text() == "Issues appear here after a check."
+    window.apply(found[2], "Healpy")    # an outdated issue, beyond the new text: nothing happens
+    assert window.editor.toPlainText() == "Court."
+
+
+def test_one_check_at_a_time(app, window):
+    window.editor.setPlainText(TEXT)
+    calls = len(window.engine.calls)
+    window.check()
+    window.check()  # Ctrl+Enter again while the first check runs
+    wait_for(app, lambda: window.language)
+    app.processEvents()
+    assert len(window.engine.calls) == calls + 1
+    assert window.check_button.isEnabled()
+
+
+def test_refused_dictionary_word_is_explained(app, window):
+    window.add_word("two words")
+    assert window.status.text().startswith("Not added")
+    assert window.user.words[""] == set()
